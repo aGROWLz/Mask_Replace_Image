@@ -179,7 +179,7 @@ graph TD
 2. 检测替换源 → prompt: "product" (确保mask准确)
    输出: replace_image, replace_mask
 
-3. CropImageWithWhiteBackground ← 关键节点！
+3. CropImageWithWhiteBackground ← 关键新节点！
    输入:
    - image: replace_image
    - mask: replace_mask
@@ -222,46 +222,6 @@ graph TD
 - 可以查看和调整处理效果
 - 更可靠和稳定
 ```
-
-### 示例5: 仅替换背景（不裁剪）🆕
-
-**目标**: 将产品图的背景替换为白色，但保持原图尺寸不变
-
-```
-场景:
-- 产品图片有复杂背景
-- 需要保持原图尺寸，不进行裁剪
-- 仅替换背景区域为白色
-
-工作流:
-1. 检测产品图 → prompt: "product"
-   输出: product_image, product_mask
-
-2. ReplaceBackgroundWithWhite ← 新节点！
-   输入:
-   - image: product_image
-   - mask: product_mask
-   - background_alpha: 0.0  ← 背景完全变为白色
-   输出: clean_image (背景为白色，原图尺寸), original_mask
-
-结果:
-- 产品物体保持原样（不透明）
-- 背景区域变为白色
-- 图片尺寸保持不变（不裁剪）
-```
-
-**与 CropImageWithWhiteBackground 的区别**:
-
-| 特性 | CropImageWithWhiteBackground | ReplaceBackgroundWithWhite |
-|------|------------------------------|---------------------------|
-| 裁剪图片 | ✅ 是（根据边界框裁剪） | ❌ 否（保持原图尺寸） |
-| 输出尺寸 | 裁剪后的尺寸 | 原图尺寸 |
-| 使用场景 | 需要裁剪物体区域 | 需要保持原图尺寸 |
-| 输出遮罩 | 裁剪后的遮罩 | 原始遮罩 |
-
-**选择建议**:
-- **需要裁剪**: 使用 `CropImageWithWhiteBackground`（适合物体替换工作流）
-- **不需要裁剪**: 使用 `ReplaceBackgroundWithWhite`（适合仅替换背景的场景）
 
 ## 参数调优指南
 
@@ -409,7 +369,7 @@ alignment=center:
 
 ### background_alpha (背景透明度控制)
 
-**此参数在 `CropImageWithWhiteBackground` 和 `ReplaceBackgroundWithWhite` 节点中使用**
+**此参数在 `CropImageWithWhiteBackground` 节点中使用**
 
 控制替换源图片背景的白化程度（**仅影响背景，不影响物体本身**）：
 
@@ -553,36 +513,6 @@ ImageReplaceWithMask:
 | 墙面/独立物体 | `center` | 均衡裁剪 |
 | 人物/头像 | `center` | 保留主要特征 |
 
-### Q10: 应该使用 CropImageWithWhiteBackground 还是 ReplaceBackgroundWithWhite？ 🆕
-
-**问题**: 两个节点都能替换背景为白色，如何选择？
-
-**解决方案**:
-根据是否需要裁剪来选择：
-
-**使用 CropImageWithWhiteBackground（裁剪模式）**:
-- ✅ 需要裁剪物体区域
-- ✅ 用于物体替换工作流
-- ✅ 去除图片边缘无关区域
-- ✅ 输出裁剪后的图片和遮罩
-
-**使用 ReplaceBackgroundWithWhite（非裁剪模式）**:
-- ✅ 需要保持原图尺寸
-- ✅ 仅替换背景，不裁剪
-- ✅ 后续处理需要原图尺寸
-- ✅ 输出原图尺寸的图片和原始遮罩
-
-**示例场景**:
-```
-场景1: 物体替换工作流
-替换图片 → CropImageWithWhiteBackground → 裁剪后的图片 → ImageReplaceWithMask
-✅ 推荐：裁剪后去除无关区域，替换效果更好
-
-场景2: 仅替换背景
-产品图片 → ReplaceBackgroundWithWhite → 背景变白的原图
-✅ 推荐：保持原图尺寸，适合展示或后续处理
-```
-
 ## 性能优化建议
 
 1. **图片尺寸**: 
@@ -701,4 +631,9 @@ ControlNet生成
 5. ✅ 可视化调试
 
 配合ComfyUI的segment_anything节点，可以实现专业级的物体替换效果！
+
+
+
+
+
 

@@ -530,7 +530,7 @@ class CropImageWithWhiteBackground:
 
 
 class ReplaceBackgroundWithWhite:
-    """将图片背景替换为白色（不裁剪）"""
+    """只替换背景为白色，不裁剪图片"""
     
     @classmethod
     def INPUT_TYPES(cls):
@@ -550,12 +550,12 @@ class ReplaceBackgroundWithWhite:
     
     CATEGORY = "image"
     FUNCTION = "main"
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("image", "mask")
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
     
     def main(self, image, mask, background_alpha):
         """
-        将图片背景替换为白色（不裁剪图片）
+        只替换背景为白色，保持原图尺寸
         
         Args:
             image: 输入图片
@@ -563,31 +563,20 @@ class ReplaceBackgroundWithWhite:
             background_alpha: 背景透明度 (0.0=白色, 1.0=原图)
             
         Returns:
-            处理后的图片和原始遮罩
+            处理后的图片（保持原始尺寸）
         """
         # 确保 mask 是 3D 的 (1, H, W)
         if mask.dim() == 2:
             mask = mask.unsqueeze(0)
         
-        # 确保 image 和 mask 尺寸匹配
-        _, img_h, img_w, _ = image.shape
-        _, mask_h, mask_w = mask.shape
-        
-        # 如果遮罩尺寸与图片不匹配，需要调整遮罩大小
-        if mask_h != img_h or mask_w != img_w:
-            # 转换遮罩为PIL并调整大小
-            mask_np = mask[0].cpu().numpy()
-            mask_np = (mask_np * 255).astype(np.uint8)
-            mask_pil = Image.fromarray(mask_np)
-            mask_pil = mask_pil.resize((img_w, img_h), Image.LANCZOS)
-            mask_np = np.array(mask_pil).astype(np.float32) / 255.0
-            mask = torch.from_numpy(mask_np)[None,]
+        # 克隆原图
+        result_image = image.clone()
         
         # 扩展 mask 维度以匹配 RGB 通道
         mask_3ch = mask.unsqueeze(-1).repeat(1, 1, 1, 3)
         
         # 创建白色背景
-        white_background = torch.ones_like(image)
+        white_background = torch.ones_like(result_image)
         
         # 处理背景：
         # - 物体区域 (mask=1): 保持原图
@@ -595,11 +584,11 @@ class ReplaceBackgroundWithWhite:
         #   background_alpha=0.0 -> 完全白色
         #   background_alpha=1.0 -> 保持原图
         result_image = (
-            image * mask_3ch +  # 前景：保持物体
-            (white_background * (1.0 - background_alpha) + image * background_alpha) * (1.0 - mask_3ch)  # 背景：混合
+            result_image * mask_3ch +  # 前景：保持物体
+            (white_background * (1.0 - background_alpha) + result_image * background_alpha) * (1.0 - mask_3ch)  # 背景：混合
         )
         
-        return (result_image, mask)
+        return (result_image,)
 
 
 class VisualizeDetectionBox:
@@ -685,7 +674,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CropImageByMask": "按遮罩裁剪图片",
     "ImageReplaceWithMask": "智能物体替换",
     "CropImageWithWhiteBackground": "裁剪图片并替换背景为白色",
-    "ReplaceBackgroundWithWhite": "替换背景为白色",
+    "ReplaceBackgroundWithWhite": "只替换背景为白色",
     "VisualizeDetectionBox": "可视化检测框",
 }
+
+
+
+
+
 
