@@ -658,6 +658,100 @@ class VisualizeDetectionBox:
         return (img_tensor,)
 
 
+class FillMaskWithColor:
+    """根据遮罩将图片的遮罩区域填充成指定颜色"""
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "mask": ("MASK",),
+                "R": ("INT", {
+                    "default": 255,
+                    "min": 0,
+                    "max": 255,
+                    "step": 1
+                }),
+                "G": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 255,
+                    "step": 1
+                }),
+                "B": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 255,
+                    "step": 1
+                }),
+            }
+        }
+    
+    CATEGORY = "image"
+    FUNCTION = "main"
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    
+    def main(self, image, mask, R, G, B):
+        """
+        将遮罩区域填充成指定颜色
+        
+        Args:
+            image: 输入图片
+            mask: 输入遮罩（遮罩区域将被填充）
+            R: 红色通道值 (0-255)
+            G: 绿色通道值 (0-255)
+            B: 蓝色通道值 (0-255)
+            
+        Returns:
+            处理后的图片（遮罩区域填充为指定颜色）
+        """
+        # 确保 mask 是 3D 的 (1, H, W)
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+        
+        # 确保遮罩和图片尺寸匹配
+        _, img_h, img_w, _ = image.shape
+        _, mask_h, mask_w = mask.shape
+        
+        # 如果尺寸不匹配，需要调整遮罩大小
+        if mask_h != img_h or mask_w != img_w:
+            # 转换遮罩为PIL并调整大小
+            mask_np = mask[0].cpu().numpy()
+            mask_np = (mask_np * 255).astype(np.uint8)
+            mask_pil = Image.fromarray(mask_np)
+            mask_pil = mask_pil.resize((img_w, img_h), Image.LANCZOS)
+            mask_np = np.array(mask_pil).astype(np.float32) / 255.0
+            mask = torch.from_numpy(mask_np)[None,]
+        
+        # 克隆原图
+        result_image = image.clone()
+        
+        # 将RGB值从0-255转换为0-1范围
+        fill_color = torch.tensor([
+            R / 255.0,
+            G / 255.0,
+            B / 255.0
+        ], device=image.device, dtype=image.dtype)
+        
+        # 扩展遮罩维度以匹配RGB通道: (1, H, W) -> (1, H, W, 3)
+        mask_3ch = mask.unsqueeze(-1).repeat(1, 1, 1, 3)
+        
+        # 扩展颜色张量以匹配图片尺寸: (3,) -> (1, H, W, 3)
+        fill_color_3d = fill_color.view(1, 1, 1, 3).expand_as(result_image)
+        
+        # 在遮罩区域填充颜色：
+        # - 遮罩区域 (mask≈1): 使用指定颜色
+        # - 非遮罩区域 (mask≈0): 保持原图
+        result_image = (
+            result_image * (1.0 - mask_3ch) +  # 非遮罩区域：保持原图
+            fill_color_3d * mask_3ch  # 遮罩区域：填充指定颜色
+        )
+        
+        return (result_image,)
+
+
 # 节点类映射
 NODE_CLASS_MAPPINGS = {
     "MaskBoundingBox": MaskBoundingBox,
@@ -666,6 +760,7 @@ NODE_CLASS_MAPPINGS = {
     "CropImageWithWhiteBackground": CropImageWithWhiteBackground,
     "ReplaceBackgroundWithWhite": ReplaceBackgroundWithWhite,
     "VisualizeDetectionBox": VisualizeDetectionBox,
+    "FillMaskWithColor": FillMaskWithColor,
 }
 
 # 节点显示名称映射
@@ -676,6 +771,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CropImageWithWhiteBackground": "裁剪图片并替换背景为白色",
     "ReplaceBackgroundWithWhite": "只替换背景为白色",
     "VisualizeDetectionBox": "可视化检测框",
+    "FillMaskWithColor": "遮罩区域填充颜色",
 }
 
 
