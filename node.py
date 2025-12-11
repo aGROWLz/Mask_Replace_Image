@@ -160,7 +160,9 @@ def composite_images(
     cover_mode: bool = False,
     alignment: str = "center",
     offset_x: int = 0,
-    offset_y: int = 0
+    offset_y: int = 0,
+    allow_crop: bool = True,
+    scale_factor: float = 0.0
 ) -> torch.Tensor:
     """
     将overlay图片合成到base图片的指定位置
@@ -175,6 +177,8 @@ def composite_images(
         alignment: 对齐方式 (center/top/bottom/left/right)
         offset_x: 水平偏移量（正数向右，负数向左）
         offset_y: 垂直偏移量（正数向下，负数向上）
+        allow_crop: 是否允许裁切（False=禁用裁切，保持完整图片）
+        scale_factor: 缩放因子（0=不缩放，正数=放大百分比，负数=缩小百分比，如10表示放大10%，-10表示缩小10%）
     
     Returns:
         合成后的图片张量
@@ -191,6 +195,30 @@ def composite_images(
         keep_aspect_ratio=True,
         cover_mode=cover_mode
     )
+    
+    # 应用缩放因子（如果有）
+    if scale_factor != 0.0:
+        _, overlay_h, overlay_w, _ = resized_overlay.shape
+        
+        # 计算缩放倍数：scale_factor = 10 表示放大10%，即乘以1.1
+        # scale_factor = -10 表示缩小10%，即乘以0.9
+        scale_multiplier = 1.0 + (scale_factor / 100.0)
+        
+        # 计算新的尺寸
+        new_w = int(overlay_w * scale_multiplier)
+        new_h = int(overlay_h * scale_multiplier)
+        
+        # 确保最小尺寸为1
+        new_w = max(1, new_w)
+        new_h = max(1, new_h)
+        
+        # 使用PIL调整图片大小
+        img_np = resized_overlay[0].cpu().numpy()
+        img_np = (img_np * 255).astype(np.uint8)
+        pil_img = Image.fromarray(img_np)
+        pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+        img_np = np.array(pil_img).astype(np.float32) / 255.0
+        resized_overlay = torch.from_numpy(img_np)[None,]
     
     # 调整遮罩大小
     _, overlay_h, overlay_w, _ = resized_overlay.shape
@@ -212,8 +240,8 @@ def composite_images(
     # 创建输出图片（复制base图片）
     result = base_image.clone()
     
-    # 处理覆盖模式：如果图片超出目标区域，需要裁剪
-    if cover_mode and (overlay_w > target_width or overlay_h > target_height):
+    # 处理覆盖模式：如果图片超出目标区域，需要裁剪（仅在允许裁切时）
+    if cover_mode and allow_crop and (overlay_w > target_width or overlay_h > target_height):
         # 根据对齐方式计算裁剪位置
         if alignment == "top":
             # 顶部对齐：从顶部开始，裁剪底部
@@ -431,6 +459,17 @@ class ImageReplaceWithMask:
                     "min": -99999,
                     "max": 99999
                 }),
+                "allow_crop": ("BOOLEAN", {
+                    "default": True,
+                    "label_on": "允许裁切",
+                    "label_off": "禁用裁切"
+                }),
+                "scale_factor": ("FLOAT", {
+                    "default": 0.0,
+                    "min": -99.0,
+                    "max": 9999.0,
+                    "step": 0.1
+                }),
             },
             "optional": {
                 "replace_mask": ("MASK",),
@@ -454,6 +493,8 @@ class ImageReplaceWithMask:
         offset_right,
         offset_up,
         offset_down,
+        allow_crop,
+        scale_factor,
         replace_mask=None
     ):
         """
@@ -471,6 +512,8 @@ class ImageReplaceWithMask:
             offset_right: 向右偏移像素数
             offset_up: 向上偏移像素数
             offset_down: 向下偏移像素数
+            allow_crop: 是否允许裁切 (True=允许裁切, False=禁用裁切保持完整)
+            scale_factor: 缩放因子 (0=不缩放, 正数=放大百分比, 负数=缩小百分比, 如10表示放大10%, -10表示缩小10%)
             replace_mask: 可选的替换图片遮罩，如果不提供则使用整个图片
             
         Returns:
@@ -508,7 +551,9 @@ class ImageReplaceWithMask:
             cover_mode=cover_mode,
             alignment=alignment,
             offset_x=offset_x,
-            offset_y=offset_y
+            offset_y=offset_y,
+            allow_crop=allow_crop,
+            scale_factor=scale_factor
         )
         
         return (result,)
