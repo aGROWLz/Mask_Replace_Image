@@ -2,6 +2,8 @@ import torch
 import numpy as np
 from PIL import Image, ImageDraw
 from typing import Tuple
+import json
+import ast
 
 
 def get_mask_bounding_box(mask: torch.Tensor) -> Tuple[int, int, int, int]:
@@ -156,7 +158,9 @@ def composite_images(
     target_bbox: Tuple[int, int, int, int],
     feather: int = 0,
     cover_mode: bool = False,
-    alignment: str = "center"
+    alignment: str = "center",
+    offset_x: int = 0,
+    offset_y: int = 0
 ) -> torch.Tensor:
     """
     将overlay图片合成到base图片的指定位置
@@ -169,6 +173,8 @@ def composite_images(
         feather: 边缘羽化像素数
         cover_mode: 覆盖模式 (True=完全覆盖, False=完全适应)
         alignment: 对齐方式 (center/top/bottom/left/right)
+        offset_x: 水平偏移量（正数向右，负数向左）
+        offset_y: 垂直偏移量（正数向下，负数向上）
     
     Returns:
         合成后的图片张量
@@ -260,32 +266,47 @@ def composite_images(
         else:  # center
             paste_left = left + (target_width - overlay_w) // 2
             paste_top = top + (target_height - overlay_h) // 2
-        
-        # 确保不超出边界
-        paste_left = max(0, min(paste_left, base_image.shape[2] - overlay_w))
-        paste_top = max(0, min(paste_top, base_image.shape[1] - overlay_h))
+    
+    # 应用位移偏移
+    paste_left = paste_left + offset_x
+    paste_top = paste_top + offset_y
     
     # 扩展遮罩维度以匹配RGB通道
     mask_3ch = resized_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
     
-    # 计算实际可以粘贴的区域（避免越界）
-    paste_h = min(overlay_h, base_image.shape[1] - paste_top)
-    paste_w = min(overlay_w, base_image.shape[2] - paste_left)
+    # 计算实际可以粘贴的区域（处理超出边界的情况）
+    # 如果粘贴位置超出边界，计算需要裁剪的部分
+    src_start_x = max(0, -paste_left)
+    src_start_y = max(0, -paste_top)
+    dst_start_x = max(0, paste_left)
+    dst_start_y = max(0, paste_top)
     
-    # 合成图片
+    # 计算实际可粘贴的宽度和高度
+    paste_w = min(overlay_w - src_start_x, base_image.shape[2] - dst_start_x)
+    paste_h = min(overlay_h - src_start_y, base_image.shape[1] - dst_start_y)
+    
+    # 如果超出边界，不进行任何粘贴
+    if paste_w <= 0 or paste_h <= 0:
+        return result
+    
+    # 使用计算好的起始位置和尺寸
+    final_paste_left = dst_start_x
+    final_paste_top = dst_start_y
+    
+    # 合成图片（使用裁剪后的区域）
     result[
         :,
-        paste_top:paste_top+paste_h,
-        paste_left:paste_left+paste_w,
+        final_paste_top:final_paste_top+paste_h,
+        final_paste_left:final_paste_left+paste_w,
         :
     ] = (
         base_image[
             :,
-            paste_top:paste_top+paste_h,
-            paste_left:paste_left+paste_w,
+            final_paste_top:final_paste_top+paste_h,
+            final_paste_left:final_paste_left+paste_w,
             :
-        ] * (1 - mask_3ch[:, :paste_h, :paste_w, :]) +
-        resized_overlay[:, :paste_h, :paste_w, :] * mask_3ch[:, :paste_h, :paste_w, :]
+        ] * (1 - mask_3ch[:, src_start_y:src_start_y+paste_h, src_start_x:src_start_x+paste_w, :]) +
+        resized_overlay[:, src_start_y:src_start_y+paste_h, src_start_x:src_start_x+paste_w, :] * mask_3ch[:, src_start_y:src_start_y+paste_h, src_start_x:src_start_x+paste_w, :]
     )
     
     return result
@@ -390,6 +411,26 @@ class ImageReplaceWithMask:
                     "max": 100,
                     "step": 1
                 }),
+                "offset_left": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999
+                }),
+                "offset_right": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999
+                }),
+                "offset_up": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999
+                }),
+                "offset_down": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999
+                }),
             },
             "optional": {
                 "replace_mask": ("MASK",),
@@ -409,6 +450,10 @@ class ImageReplaceWithMask:
         cover_mode,
         alignment,
         feather,
+        offset_left,
+        offset_right,
+        offset_up,
+        offset_down,
         replace_mask=None
     ):
         """
@@ -422,6 +467,10 @@ class ImageReplaceWithMask:
             cover_mode: 覆盖模式 (True=完全覆盖可能裁剪, False=完全适应可能留空)
             alignment: 对齐方式 (center/top/bottom/left/right)
             feather: 边缘羽化程度
+            offset_left: 向左偏移像素数
+            offset_right: 向右偏移像素数
+            offset_up: 向上偏移像素数
+            offset_down: 向下偏移像素数
             replace_mask: 可选的替换图片遮罩，如果不提供则使用整个图片
             
         Returns:
@@ -445,6 +494,10 @@ class ImageReplaceWithMask:
         # 使用 replace_mask 作为合成遮罩
         cropped_mask = replace_mask
         
+        # 计算最终偏移量：offset_x = 右 - 左，offset_y = 下 - 上
+        offset_x = offset_right - offset_left
+        offset_y = offset_down - offset_up
+        
         # 合成图片
         result = composite_images(
             base_image,
@@ -453,7 +506,9 @@ class ImageReplaceWithMask:
             target_bbox,
             feather,
             cover_mode=cover_mode,
-            alignment=alignment
+            alignment=alignment,
+            offset_x=offset_x,
+            offset_y=offset_y
         )
         
         return (result,)
@@ -752,6 +807,190 @@ class FillMaskWithColor:
         return (result_image,)
 
 
+class MergeMasks:
+    """合并多个遮罩为一个遮罩"""
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "masks": ("MASK",),
+            }
+        }
+    
+    CATEGORY = "mask"
+    FUNCTION = "main"
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("merged_mask",)
+    
+    def main(self, masks):
+        """
+        合并多个遮罩为一个遮罩
+        
+        Args:
+            masks: 批量遮罩，shape为 (N, H, W) 或 (N, 1, H, W)
+            
+        Returns:
+            合并后的遮罩 shape (1, H, W)
+        """
+        # 确保masks是tensor
+        if not isinstance(masks, torch.Tensor):
+            masks = torch.tensor(masks)
+        
+        # 处理不同的输入格式
+        if masks.dim() == 2:
+            # (H, W) -> (1, H, W)
+            masks = masks.unsqueeze(0)
+        elif masks.dim() == 4:
+            # (N, 1, H, W) -> (N, H, W)
+            masks = masks.squeeze(1)
+        
+        # 现在masks应该是 (N, H, W) 格式
+        if masks.dim() != 3:
+            raise ValueError(f"遮罩格式不正确，期望 (N, H, W)，得到 {masks.shape}")
+        
+        # 合并遮罩：对所有遮罩取最大值（取并集）
+        # 这样可以保留所有物体的遮罩区域
+        merged_mask = torch.max(masks, dim=0)[0]  # 对第一个维度取最大值
+        
+        # 确保输出格式为 (1, H, W)
+        if merged_mask.dim() == 2:
+            merged_mask = merged_mask.unsqueeze(0)
+        
+        return (merged_mask,)
+
+
+class SelectLargestMask:
+    """根据boxes面积筛选出最大的遮罩"""
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "masks": ("MASK",),
+                "boxes": ("STRING", {
+                    "default": "[]",
+                    "multiline": True
+                }),
+            }
+        }
+    
+    CATEGORY = "mask"
+    FUNCTION = "main"
+    RETURN_TYPES = ("MASK", "INT")
+    RETURN_NAMES = ("largest_mask", "index")
+    
+    def main(self, masks, boxes):
+        """
+        根据boxes面积筛选出最大的遮罩
+        
+        Args:
+            masks: 批量遮罩，shape为 (N, H, W) 或 (N, 1, H, W)
+            boxes: boxes字符串或列表，格式如 "[[x1,y1,x2,y2], [x1,y1,x2,y2], ...]"
+                  或 [[x1,y1,x2,y2], [x1,y1,x2,y2], ...]
+            
+        Returns:
+            largest_mask: 最大的遮罩 shape (1, H, W)
+            index: 最大遮罩的索引
+        """
+        # 确保masks是tensor
+        if not isinstance(masks, torch.Tensor):
+            masks = torch.tensor(masks)
+        
+        # 处理不同的输入格式
+        if masks.dim() == 2:
+            # (H, W) -> (1, H, W)
+            masks = masks.unsqueeze(0)
+        elif masks.dim() == 4:
+            # (N, 1, H, W) -> (N, H, W)
+            masks = masks.squeeze(1)
+        
+        # 现在masks应该是 (N, H, W) 格式
+        if masks.dim() != 3:
+            raise ValueError(f"遮罩格式不正确，期望 (N, H, W)，得到 {masks.shape}")
+        
+        num_masks = masks.shape[0]
+        
+        # 解析boxes
+        boxes_list = None
+        try:
+            if isinstance(boxes, str):
+                # 尝试解析JSON字符串
+                try:
+                    boxes_list = json.loads(boxes)
+                except:
+                    # JSON解析失败，尝试作为Python字面量（更安全的方式）
+                    try:
+                        # 使用ast.literal_eval替代eval，更安全
+                        boxes_list = ast.literal_eval(boxes)
+                    except:
+                        boxes_list = None
+            elif isinstance(boxes, (list, tuple)):
+                boxes_list = boxes
+            elif isinstance(boxes, torch.Tensor):
+                # 如果是tensor，转换为列表
+                boxes_list = boxes.cpu().tolist()
+            
+            # 处理嵌套列表格式：[[[x1,y1,x2,y2], ...], ...] -> [[x1,y1,x2,y2], ...]
+            if boxes_list and len(boxes_list) > 0:
+                if isinstance(boxes_list[0], list) and len(boxes_list[0]) > 0:
+                    if isinstance(boxes_list[0][0], list) or isinstance(boxes_list[0][0], (int, float)):
+                        # 检查是否是嵌套格式
+                        first_item = boxes_list[0]
+                        if isinstance(first_item, list) and len(first_item) > 0:
+                            if isinstance(first_item[0], list):
+                                # 是嵌套格式 [[[x1,y1,x2,y2], ...], ...]，取第一层
+                                boxes_list = boxes_list[0] if boxes_list else []
+            
+        except Exception as e:
+            boxes_list = None
+        
+        # 计算每个box的面积
+        areas = []
+        if boxes_list and len(boxes_list) > 0:
+            for box in boxes_list:
+                try:
+                    # 处理不同的box格式
+                    if isinstance(box, (list, tuple)) and len(box) >= 4:
+                        # [x1, y1, x2, y2] 格式
+                        x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+                        area = abs((x2 - x1) * (y2 - y1))
+                        areas.append(area)
+                    elif isinstance(box, torch.Tensor) and box.numel() >= 4:
+                        # tensor格式
+                        box_values = box.cpu().tolist()
+                        if isinstance(box_values, list):
+                            x1, y1, x2, y2 = float(box_values[0]), float(box_values[1]), float(box_values[2]), float(box_values[3])
+                        else:
+                            x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+                        area = abs((x2 - x1) * (y2 - y1))
+                        areas.append(area)
+                    else:
+                        areas.append(0)
+                except:
+                    areas.append(0)
+        
+        # 如果没有有效的boxes，或者boxes数量与masks不匹配，使用遮罩像素数
+        if not areas or len(areas) != num_masks:
+            # 计算每个遮罩的非零像素数（面积）
+            areas = []
+            for i in range(num_masks):
+                mask_area = torch.sum(masks[i] > 0).item()
+                areas.append(mask_area)
+        
+        # 找到面积最大的索引
+        if not areas:
+            # 如果没有有效的面积数据，返回第一个遮罩
+            largest_idx = 0
+        else:
+            largest_idx = int(np.argmax(areas))
+        
+        # 提取最大的遮罩
+        largest_mask = masks[largest_idx].unsqueeze(0)  # (H, W) -> (1, H, W)
+        
+        return (largest_mask, largest_idx)
+
+
 # 节点类映射
 NODE_CLASS_MAPPINGS = {
     "MaskBoundingBox": MaskBoundingBox,
@@ -761,6 +1000,8 @@ NODE_CLASS_MAPPINGS = {
     "ReplaceBackgroundWithWhite": ReplaceBackgroundWithWhite,
     "VisualizeDetectionBox": VisualizeDetectionBox,
     "FillMaskWithColor": FillMaskWithColor,
+    "MergeMasks": MergeMasks,
+    "SelectLargestMask": SelectLargestMask,
 }
 
 # 节点显示名称映射
@@ -772,6 +1013,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ReplaceBackgroundWithWhite": "只替换背景为白色",
     "VisualizeDetectionBox": "可视化检测框",
     "FillMaskWithColor": "遮罩区域填充颜色",
+    "MergeMasks": "合并遮罩",
+    "SelectLargestMask": "筛选最大遮罩",
 }
 
 
