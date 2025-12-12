@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import cv2
 from PIL import Image, ImageDraw
 from typing import Tuple
 import json
@@ -158,36 +159,15 @@ def composite_images(
     target_bbox: Tuple[int, int, int, int],
     feather: int = 0,
     cover_mode: bool = False,
-    alignment: str = "center",
-    offset_x: int = 0,
-    offset_y: int = 0,
-    allow_crop: bool = True,
-    scale_factor: float = 0.0
+    alignment: str = "center"
 ) -> torch.Tensor:
     """
-    将overlay图片合成到base图片的指定位置
-    
-    Args:
-        base_image: 基础图片张量 shape (1, H, W, C)
-        overlay_image: 覆盖图片张量 shape (1, H', W', C)
-        overlay_mask: 覆盖图片的遮罩 shape (1, H', W')
-        target_bbox: 目标位置边界框 (left, top, right, bottom)
-        feather: 边缘羽化像素数
-        cover_mode: 覆盖模式 (True=完全覆盖, False=完全适应)
-        alignment: 对齐方式 (center/top/bottom/left/right)
-        offset_x: 水平偏移量（正数向右，负数向左）
-        offset_y: 垂直偏移量（正数向下，负数向上）
-        allow_crop: 是否允许裁切（False=禁用裁切，保持完整图片）
-        scale_factor: 缩放因子（0=不缩放，正数=放大百分比，负数=缩小百分比，如10表示放大10%，-10表示缩小10%）
-    
-    Returns:
-        合成后的图片张量
+    将overlay图片合成到base图片的指定位置（基础版，与bak一致）
     """
     left, top, right, bottom = target_bbox
     target_width = right - left + 1
     target_height = bottom - top + 1
     
-    # 调整overlay图片大小以适配目标区域
     resized_overlay = resize_image_to_fit(
         overlay_image,
         target_width,
@@ -196,40 +176,13 @@ def composite_images(
         cover_mode=cover_mode
     )
     
-    # 应用缩放因子（如果有）
-    if scale_factor != 0.0:
-        _, overlay_h, overlay_w, _ = resized_overlay.shape
-        
-        # 计算缩放倍数：scale_factor = 10 表示放大10%，即乘以1.1
-        # scale_factor = -10 表示缩小10%，即乘以0.9
-        scale_multiplier = 1.0 + (scale_factor / 100.0)
-        
-        # 计算新的尺寸
-        new_w = int(overlay_w * scale_multiplier)
-        new_h = int(overlay_h * scale_multiplier)
-        
-        # 确保最小尺寸为1
-        new_w = max(1, new_w)
-        new_h = max(1, new_h)
-        
-        # 使用PIL调整图片大小
-        img_np = resized_overlay[0].cpu().numpy()
-        img_np = (img_np * 255).astype(np.uint8)
-        pil_img = Image.fromarray(img_np)
-        pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
-        img_np = np.array(pil_img).astype(np.float32) / 255.0
-        resized_overlay = torch.from_numpy(img_np)[None,]
-    
-    # 调整遮罩大小
     _, overlay_h, overlay_w, _ = resized_overlay.shape
     
-    # 转换遮罩为PIL并调整大小
     mask_np = overlay_mask[0].cpu().numpy()
     mask_np = (mask_np * 255).astype(np.uint8)
     mask_pil = Image.fromarray(mask_np)
     mask_pil = mask_pil.resize((overlay_w, overlay_h), Image.LANCZOS)
     
-    # 应用羽化效果
     if feather > 0:
         from PIL import ImageFilter
         mask_pil = mask_pil.filter(ImageFilter.GaussianBlur(feather))
@@ -237,48 +190,36 @@ def composite_images(
     mask_np = np.array(mask_pil).astype(np.float32) / 255.0
     resized_mask = torch.from_numpy(mask_np)[None,]
     
-    # 创建输出图片（复制base图片）
     result = base_image.clone()
     
-    # 处理覆盖模式：如果图片超出目标区域，需要裁剪（仅在允许裁切时）
-    if cover_mode and allow_crop and (overlay_w > target_width or overlay_h > target_height):
-        # 根据对齐方式计算裁剪位置
+    if cover_mode and (overlay_w > target_width or overlay_h > target_height):
         if alignment == "top":
-            # 顶部对齐：从顶部开始，裁剪底部
             crop_top = 0
             crop_left = max(0, (overlay_w - target_width) // 2)
         elif alignment == "bottom":
-            # 底部对齐：从底部开始，裁剪顶部
             crop_top = max(0, overlay_h - target_height)
             crop_left = max(0, (overlay_w - target_width) // 2)
         elif alignment == "left":
-            # 左对齐：从左侧开始，裁剪右侧
             crop_left = 0
             crop_top = max(0, (overlay_h - target_height) // 2)
         elif alignment == "right":
-            # 右对齐：从右侧开始，裁剪左侧
             crop_left = max(0, overlay_w - target_width)
             crop_top = max(0, (overlay_h - target_height) // 2)
-        else:  # center (默认)
-            # 居中对齐：居中裁剪
+        else:
             crop_left = max(0, (overlay_w - target_width) // 2)
             crop_top = max(0, (overlay_h - target_height) // 2)
         
         crop_right = crop_left + min(overlay_w - crop_left, target_width)
         crop_bottom = crop_top + min(overlay_h - crop_top, target_height)
         
-        # 裁剪图片和遮罩
         resized_overlay = resized_overlay[:, crop_top:crop_bottom, crop_left:crop_right, :]
         resized_mask = resized_mask[:, crop_top:crop_bottom, crop_left:crop_right]
         
-        # 更新尺寸
         _, overlay_h, overlay_w, _ = resized_overlay.shape
         
-        # 重新计算粘贴位置（裁剪后应该正好填满）
         paste_left = left
         paste_top = top
     else:
-        # 计算粘贴位置（非覆盖模式或图片未超出）
         if alignment == "top":
             paste_top = top
             paste_left = left + (target_width - overlay_w) // 2
@@ -291,37 +232,155 @@ def composite_images(
         elif alignment == "right":
             paste_left = left + target_width - overlay_w
             paste_top = top + (target_height - overlay_h) // 2
-        else:  # center
+        else:
+            paste_left = left + (target_width - overlay_w) // 2
+            paste_top = top + (target_height - overlay_h) // 2
+        
+        paste_left = max(0, min(paste_left, base_image.shape[2] - overlay_w))
+        paste_top = max(0, min(paste_top, base_image.shape[1] - overlay_h))
+    
+    mask_3ch = resized_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
+    
+    paste_h = min(overlay_h, base_image.shape[1] - paste_top)
+    paste_w = min(overlay_w, base_image.shape[2] - paste_left)
+    
+    result[
+        :,
+        paste_top:paste_top+paste_h,
+        paste_left:paste_left+paste_w,
+        :
+    ] = (
+        base_image[
+            :,
+            paste_top:paste_top+paste_h,
+            paste_left:paste_left+paste_w,
+            :
+        ] * (1 - mask_3ch[:, :paste_h, :paste_w, :]) +
+        resized_overlay[:, :paste_h, :paste_w, :] * mask_3ch[:, :paste_h, :paste_w, :]
+    )
+    
+    return result
+
+
+def composite_images_v2(
+    base_image: torch.Tensor,
+    overlay_image: torch.Tensor,
+    overlay_mask: torch.Tensor,
+    target_bbox: Tuple[int, int, int, int],
+    feather: int = 0,
+    cover_mode: bool = False,
+    alignment: str = "center",
+    offset_x: int = 0,
+    offset_y: int = 0,
+    allow_crop: bool = True,
+    scale_factor: float = 0.0
+) -> torch.Tensor:
+    """
+    将overlay图片合成到base图片的指定位置（增强版，含偏移/缩放/裁切）
+    """
+    left, top, right, bottom = target_bbox
+    target_width = right - left + 1
+    target_height = bottom - top + 1
+    
+    resized_overlay = resize_image_to_fit(
+        overlay_image,
+        target_width,
+        target_height,
+        keep_aspect_ratio=True,
+        cover_mode=cover_mode
+    )
+    
+    if scale_factor != 0.0:
+        _, overlay_h, overlay_w, _ = resized_overlay.shape
+        scale_multiplier = 1.0 + (scale_factor / 100.0)
+        new_w = max(1, int(overlay_w * scale_multiplier))
+        new_h = max(1, int(overlay_h * scale_multiplier))
+        img_np = resized_overlay[0].cpu().numpy()
+        img_np = (img_np * 255).astype(np.uint8)
+        pil_img = Image.fromarray(img_np)
+        pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+        img_np = np.array(pil_img).astype(np.float32) / 255.0
+        resized_overlay = torch.from_numpy(img_np)[None,]
+    
+    _, overlay_h, overlay_w, _ = resized_overlay.shape
+    
+    mask_np = overlay_mask[0].cpu().numpy()
+    mask_np = (mask_np * 255).astype(np.uint8)
+    mask_pil = Image.fromarray(mask_np)
+    mask_pil = mask_pil.resize((overlay_w, overlay_h), Image.LANCZOS)
+    
+    if feather > 0:
+        from PIL import ImageFilter
+        mask_pil = mask_pil.filter(ImageFilter.GaussianBlur(feather))
+    
+    mask_np = np.array(mask_pil).astype(np.float32) / 255.0
+    resized_mask = torch.from_numpy(mask_np)[None,]
+    
+    result = base_image.clone()
+    
+    if cover_mode and allow_crop and (overlay_w > target_width or overlay_h > target_height):
+        if alignment == "top":
+            crop_top = 0
+            crop_left = max(0, (overlay_w - target_width) // 2)
+        elif alignment == "bottom":
+            crop_top = max(0, overlay_h - target_height)
+            crop_left = max(0, (overlay_w - target_width) // 2)
+        elif alignment == "left":
+            crop_left = 0
+            crop_top = max(0, (overlay_h - target_height) // 2)
+        elif alignment == "right":
+            crop_left = max(0, overlay_w - target_width)
+            crop_top = max(0, (overlay_h - target_height) // 2)
+        else:
+            crop_left = max(0, (overlay_w - target_width) // 2)
+            crop_top = max(0, (overlay_h - target_height) // 2)
+        
+        crop_right = crop_left + min(overlay_w - crop_left, target_width)
+        crop_bottom = crop_top + min(overlay_h - crop_top, target_height)
+        
+        resized_overlay = resized_overlay[:, crop_top:crop_bottom, crop_left:crop_right, :]
+        resized_mask = resized_mask[:, crop_top:crop_bottom, crop_left:crop_right]
+        
+        _, overlay_h, overlay_w, _ = resized_overlay.shape
+        
+        paste_left = left
+        paste_top = top
+    else:
+        if alignment == "top":
+            paste_top = top
+            paste_left = left + (target_width - overlay_w) // 2
+        elif alignment == "bottom":
+            paste_top = top + target_height - overlay_h
+            paste_left = left + (target_width - overlay_w) // 2
+        elif alignment == "left":
+            paste_left = left
+            paste_top = top + (target_height - overlay_h) // 2
+        elif alignment == "right":
+            paste_left = left + target_width - overlay_w
+            paste_top = top + (target_height - overlay_h) // 2
+        else:
             paste_left = left + (target_width - overlay_w) // 2
             paste_top = top + (target_height - overlay_h) // 2
     
-    # 应用位移偏移
     paste_left = paste_left + offset_x
     paste_top = paste_top + offset_y
     
-    # 扩展遮罩维度以匹配RGB通道
     mask_3ch = resized_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
     
-    # 计算实际可以粘贴的区域（处理超出边界的情况）
-    # 如果粘贴位置超出边界，计算需要裁剪的部分
     src_start_x = max(0, -paste_left)
     src_start_y = max(0, -paste_top)
     dst_start_x = max(0, paste_left)
     dst_start_y = max(0, paste_top)
     
-    # 计算实际可粘贴的宽度和高度
     paste_w = min(overlay_w - src_start_x, base_image.shape[2] - dst_start_x)
     paste_h = min(overlay_h - src_start_y, base_image.shape[1] - dst_start_y)
     
-    # 如果超出边界，不进行任何粘贴
     if paste_w <= 0 or paste_h <= 0:
         return result
     
-    # 使用计算好的起始位置和尺寸
     final_paste_left = dst_start_x
     final_paste_top = dst_start_y
     
-    # 合成图片（使用裁剪后的区域）
     result[
         :,
         final_paste_top:final_paste_top+paste_h,
@@ -405,16 +464,81 @@ class CropImageByMask:
 
 class ImageReplaceWithMask:
     """
-    根据遮罩智能替换图片物体
+    根据遮罩智能替换图片物体（基础版，保持与bak一致）
+    """
     
-    这个节点可以：
-    1. 检测原图中的物体并生成边界框
-    2. 使用处理好的替换图（推荐先用 CropImageWithWhiteBackground 预处理）
-    3. 自适应缩放替换物体
-    4. 智能合成到原图
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "base_image": ("IMAGE",),
+                "base_mask": ("MASK",),
+                "replace_image": ("IMAGE",),
+                "keep_aspect_ratio": ("BOOLEAN", {"default": True}),
+                "cover_mode": ("BOOLEAN", {
+                    "default": True,
+                    "label_on": "完全覆盖",
+                    "label_off": "完全适应"
+                }),
+                "alignment": (["center", "top", "bottom", "left", "right"], {
+                    "default": "bottom"
+                }),
+                "feather": ("INT", {
+                    "default": 5,
+                    "min": 0,
+                    "max": 100,
+                    "step": 1
+                }),
+            },
+            "optional": {
+                "replace_mask": ("MASK",),
+            }
+        }
     
-    注意：replace_image 推荐使用 CropImageWithWhiteBackground 节点预处理，
-         已经裁剪好并添加了白色背景，可以直接使用
+    CATEGORY = "image"
+    FUNCTION = "main"
+    RETURN_TYPES = ("IMAGE",)
+    
+    def main(
+        self,
+        base_image,
+        base_mask,
+        replace_image,
+        keep_aspect_ratio,
+        cover_mode,
+        alignment,
+        feather,
+        replace_mask=None
+    ):
+        # 获取基础图片遮罩的边界框
+        target_bbox = get_mask_bounding_box(base_mask)
+        
+        if replace_mask is None:
+            _, h, w, _ = replace_image.shape
+            replace_mask = torch.ones(1, h, w)
+        
+        if replace_mask.dim() == 2:
+            replace_mask = replace_mask.unsqueeze(0)
+        
+        cropped_replace = replace_image
+        cropped_mask = replace_mask
+        
+        result = composite_images(
+            base_image,
+            cropped_replace,
+            cropped_mask,
+            target_bbox,
+            feather,
+            cover_mode=cover_mode,
+            alignment=alignment
+        )
+        
+        return (result,)
+
+
+class ImageReplaceWithMaskV2:
+    """
+    根据遮罩智能替换图片物体（增强版，含偏移/缩放/裁切）
     """
     
     @classmethod
@@ -497,52 +621,23 @@ class ImageReplaceWithMask:
         scale_factor,
         replace_mask=None
     ):
-        """
-        替换图片中的物体
-        
-        Args:
-            base_image: 基础图片
-            base_mask: 基础图片的遮罩（标识要替换的区域）
-            replace_image: 替换源图片（推荐使用 CropImageWithWhiteBackground 预处理）
-            keep_aspect_ratio: 是否保持宽高比
-            cover_mode: 覆盖模式 (True=完全覆盖可能裁剪, False=完全适应可能留空)
-            alignment: 对齐方式 (center/top/bottom/left/right)
-            feather: 边缘羽化程度
-            offset_left: 向左偏移像素数
-            offset_right: 向右偏移像素数
-            offset_up: 向上偏移像素数
-            offset_down: 向下偏移像素数
-            allow_crop: 是否允许裁切 (True=允许裁切, False=禁用裁切保持完整)
-            scale_factor: 缩放因子 (0=不缩放, 正数=放大百分比, 负数=缩小百分比, 如10表示放大10%, -10表示缩小10%)
-            replace_mask: 可选的替换图片遮罩，如果不提供则使用整个图片
-            
-        Returns:
-            合成后的图片
-        """
         # 获取基础图片遮罩的边界框
         target_bbox = get_mask_bounding_box(base_mask)
         
-        # 如果没有提供 replace_mask，创建一个全1的遮罩（使用整个图片）
         if replace_mask is None:
             _, h, w, _ = replace_image.shape
             replace_mask = torch.ones(1, h, w)
         
-        # 确保 mask 是 3D 的 (1, H, W)
         if replace_mask.dim() == 2:
             replace_mask = replace_mask.unsqueeze(0)
         
-        # 直接使用 replace_image（已经被 CropImageWithWhiteBackground 处理过）
         cropped_replace = replace_image
-        
-        # 使用 replace_mask 作为合成遮罩
         cropped_mask = replace_mask
         
-        # 计算最终偏移量：offset_x = 右 - 左，offset_y = 下 - 上
         offset_x = offset_right - offset_left
         offset_y = offset_down - offset_up
         
-        # 合成图片
-        result = composite_images(
+        result = composite_images_v2(
             base_image,
             cropped_replace,
             cropped_mask,
@@ -1036,17 +1131,107 @@ class SelectLargestMask:
         return (largest_mask, largest_idx)
 
 
+class SelectLargestMaskByArea:
+    """根据mask面积直接筛选出最大的遮罩（不依赖bbox）"""
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "masks": ("MASK",),
+            }
+        }
+    
+    CATEGORY = "mask"
+    FUNCTION = "main"
+    RETURN_TYPES = ("MASK", "INT")
+    RETURN_NAMES = ("largest_mask", "index")
+    
+    def main(self, masks):
+        """
+        按连通域面积筛选最大的遮罩（阈值二值化 + 最大连通域，类似 Mask-filter）
+        
+        Args:
+            masks: 批量遮罩，shape为 (N, H, W) 或 (N, 1, H, W) 或 (H, W)
+        """
+        # 确保masks是tensor
+        if not isinstance(masks, torch.Tensor):
+            masks = torch.tensor(masks)
+        
+        # 处理不同的输入格式
+        if masks.dim() == 2:
+            masks = masks.unsqueeze(0)          # (H, W) -> (1, H, W)
+        elif masks.dim() == 4:
+            masks = masks.squeeze(1)            # (N, 1, H, W) -> (N, H, W)
+        
+        if masks.dim() != 3:
+            raise ValueError(f"遮罩格式不正确，期望 (N, H, W)，得到 {masks.shape}")
+        
+        # 若只有单个遮罩，直接用连通域筛一遍
+        if masks.shape[0] == 1:
+            largest_mask = self._largest_component(masks[0])
+            return (largest_mask.unsqueeze(0), 0)
+        
+        # 遍历批次，取每个mask的最大连通域面积，再整体取最大
+        best_idx = 0
+        best_area = -1
+        best_mask = None
+        for i in range(masks.shape[0]):
+            lm = self._largest_component(masks[i])
+            area = lm.sum().item()
+            if area > best_area:
+                best_area = area
+                best_idx = i
+                best_mask = lm
+        
+        if best_mask is None:
+            # fallback：返回第一个
+            return (masks[0].unsqueeze(0), 0)
+        
+        return (best_mask.unsqueeze(0), best_idx)
+    
+    def _largest_component(self, mask_tensor, threshold: float = 0.5):
+        """
+        对单个遮罩取最大连通域，返回 (H, W) tensor
+        """
+        mask_np = mask_tensor.cpu().numpy().astype(np.float32)
+        if mask_np.ndim > 2:
+            mask_np = mask_np[0]
+        
+        # 二值化
+        binary = (mask_np >= threshold).astype(np.uint8)
+        
+        # 找连通域
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        if num_labels <= 1:
+            return torch.from_numpy(binary.astype(np.float32))
+        
+        # 最大前景（排除背景label 0）
+        max_label = 1
+        max_area = stats[1, cv2.CC_STAT_AREA]
+        for lbl in range(2, num_labels):
+            area = stats[lbl, cv2.CC_STAT_AREA]
+            if area > max_area:
+                max_area = area
+                max_label = lbl
+        
+        largest = (labels == max_label).astype(np.float32)
+        return torch.from_numpy(largest)
+
+
 # 节点类映射
 NODE_CLASS_MAPPINGS = {
     "MaskBoundingBox": MaskBoundingBox,
     "CropImageByMask": CropImageByMask,
     "ImageReplaceWithMask": ImageReplaceWithMask,
+    "ImageReplaceWithMaskV2": ImageReplaceWithMaskV2,
     "CropImageWithWhiteBackground": CropImageWithWhiteBackground,
     "ReplaceBackgroundWithWhite": ReplaceBackgroundWithWhite,
     "VisualizeDetectionBox": VisualizeDetectionBox,
     "FillMaskWithColor": FillMaskWithColor,
     "MergeMasks": MergeMasks,
     "SelectLargestMask": SelectLargestMask,
+    "SelectLargestMaskByArea": SelectLargestMaskByArea,
 }
 
 # 节点显示名称映射
@@ -1054,12 +1239,14 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MaskBoundingBox": "提取遮罩边界框",
     "CropImageByMask": "按遮罩裁剪图片",
     "ImageReplaceWithMask": "智能物体替换",
+    "ImageReplaceWithMaskV2": "智能物体替换 V2",
     "CropImageWithWhiteBackground": "裁剪图片并替换背景为白色",
     "ReplaceBackgroundWithWhite": "只替换背景为白色",
     "VisualizeDetectionBox": "可视化检测框",
     "FillMaskWithColor": "遮罩区域填充颜色",
     "MergeMasks": "合并遮罩",
     "SelectLargestMask": "筛选最大遮罩",
+    "SelectLargestMaskByArea": "筛选最大遮罩（按面积）",
 }
 
 
