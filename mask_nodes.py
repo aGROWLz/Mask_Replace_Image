@@ -786,6 +786,169 @@ class ReplaceBackgroundWithWhite:
         return (result_image,)
 
 
+class ReplaceBackgroundWithWhiteExpand:
+    """替换背景为白色，并可扩展空白区域以缩小遮罩物品占比"""
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "expand_up": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999,
+                    "tooltip": "向上扩展空白区域（正数扩展空白缩小物品，负数反向扩展）"
+                }),
+                "expand_down": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999,
+                    "tooltip": "向下扩展空白区域（正数扩展空白缩小物品，负数反向扩展）"
+                }),
+                "expand_left": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999,
+                    "tooltip": "向左扩展空白区域（正数扩展空白缩小物品，负数反向扩展）"
+                }),
+                "expand_right": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999,
+                    "tooltip": "向右扩展空白区域（正数扩展空白缩小物品，负数反向扩展）"
+                }),
+                "background_alpha": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "display": "slider",
+                    "tooltip": "背景透明度 (0.0=完全白色, 1.0=保持原图)"
+                }),
+            },
+            "optional": {
+                "mask": ("MASK",),
+            }
+        }
+    
+    CATEGORY = "image"
+    FUNCTION = "main"
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    
+    def main(self, image, expand_up, expand_down, expand_left, expand_right, background_alpha, mask=None):
+        """
+        替换背景为白色，并向外扩展画布尺寸以缩小遮罩物品占比
+        
+        Args:
+            image: 输入图片
+            expand_up: 向上扩展画布（正数向上扩展，负数反向扩展）
+            expand_down: 向下扩展画布（正数向下扩展，负数反向扩展）
+            expand_left: 向左扩展画布（正数向左扩展，负数反向扩展）
+            expand_right: 向右扩展画布（正数向右扩展，负数反向扩展）
+            background_alpha: 背景透明度 (0.0=完全白色, 1.0=保持原图)
+            mask: 可选输入遮罩，如果提供则根据遮罩处理背景
+            
+        Returns:
+            扩展后的图片（新尺寸）
+        """
+        # 获取原图片尺寸
+        _, img_h, img_w, _ = image.shape
+        
+        # 计算新画布尺寸（向外扩展）
+        new_width = img_w + expand_left + expand_right
+        new_height = img_h + expand_up + expand_down
+        
+        # 确保新尺寸至少为1
+        new_width = max(1, new_width)
+        new_height = max(1, new_height)
+        
+        # 创建新的白色画布
+        white_background = torch.ones(1, new_height, new_width, 3, device=image.device, dtype=image.dtype)
+        
+        # 计算原图片在新画布中的位置
+        # 如果expand_left为正，原图向右移动；如果为负，原图向左移动（需要裁剪左侧）
+        paste_x = max(0, expand_left)  # 原图在新画布中的x位置
+        paste_y = max(0, expand_up)    # 原图在新画布中的y位置
+        
+        # 计算原图中要粘贴的区域
+        # 如果expand_left为负，需要裁剪原图左侧
+        src_start_x = max(0, -expand_left)   # 原图左侧裁剪量
+        src_start_y = max(0, -expand_up)     # 原图上方裁剪量
+        # 如果expand_right为负，需要裁剪原图右侧
+        src_end_x = img_w - max(0, -expand_right)   # 原图右侧保留到此处
+        src_end_y = img_h - max(0, -expand_down)     # 原图下方保留到此处
+        
+        # 确保有效区域
+        src_end_x = max(src_start_x, src_end_x)
+        src_end_y = max(src_start_y, src_end_y)
+        
+        # 计算粘贴尺寸
+        paste_width = src_end_x - src_start_x
+        paste_height = src_end_y - src_start_y
+        
+        # 计算目标粘贴区域
+        dst_start_x = paste_x
+        dst_start_y = paste_y
+        dst_end_x = paste_x + paste_width
+        dst_end_y = paste_y + paste_height
+        
+        # 将原图片粘贴到新画布上
+        result_image = white_background.clone()
+        if paste_width > 0 and paste_height > 0:
+            result_image[
+                :,
+                dst_start_y:dst_end_y,
+                dst_start_x:dst_end_x,
+                :
+            ] = image[
+                :,
+                src_start_y:src_end_y,
+                src_start_x:src_end_x,
+                :
+            ]
+        
+        # 如果没有提供mask，直接返回扩展后的图片（背景已经是白色）
+        if mask is None:
+            return (result_image,)
+        
+        # 如果有mask，处理遮罩逻辑
+        # 确保 mask 是 3D 的 (1, H, W)
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+        
+        # 创建扩展后的遮罩
+        expanded_mask = torch.zeros(1, new_height, new_width, device=mask.device, dtype=mask.dtype)
+        
+        # 将原遮罩粘贴到新位置（使用相同的粘贴区域）
+        if paste_width > 0 and paste_height > 0:
+            expanded_mask[
+                :,
+                dst_start_y:dst_end_y,
+                dst_start_x:dst_end_x
+            ] = mask[
+                :,
+                src_start_y:src_end_y,
+                src_start_x:src_end_x
+            ]
+        
+        # 扩展 mask 维度以匹配 RGB 通道
+        mask_3ch = expanded_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
+        
+        # 处理背景：
+        # - 物体区域 (mask=1): 保持原图
+        # - 背景区域 (mask=0): 根据 background_alpha 混合白色
+        #   background_alpha=0.0 -> 完全白色
+        #   background_alpha=1.0 -> 保持原图
+        result_image = (
+            result_image * mask_3ch +  # 前景：保持物体
+            (white_background * (1.0 - background_alpha) + result_image * background_alpha) * (1.0 - mask_3ch)  # 背景：混合
+        )
+        
+        return (result_image,)
+
+
 class VisualizeDetectionBox:
     """在图片上可视化边界框"""
     
@@ -1227,6 +1390,7 @@ NODE_CLASS_MAPPINGS = {
     "ImageReplaceWithMaskV2": ImageReplaceWithMaskV2,
     "CropImageWithWhiteBackground": CropImageWithWhiteBackground,
     "ReplaceBackgroundWithWhite": ReplaceBackgroundWithWhite,
+    "ReplaceBackgroundWithWhiteExpand": ReplaceBackgroundWithWhiteExpand,
     "VisualizeDetectionBox": VisualizeDetectionBox,
     "FillMaskWithColor": FillMaskWithColor,
     "MergeMasks": MergeMasks,
@@ -1242,6 +1406,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ImageReplaceWithMaskV2": "智能物体替换 V2",
     "CropImageWithWhiteBackground": "裁剪图片并替换背景为白色",
     "ReplaceBackgroundWithWhite": "只替换背景为白色",
+    "ReplaceBackgroundWithWhiteExpand": "替换背景为白色（可扩展空白）",
     "VisualizeDetectionBox": "可视化检测框",
     "FillMaskWithColor": "遮罩区域填充颜色",
     "MergeMasks": "合并遮罩",
