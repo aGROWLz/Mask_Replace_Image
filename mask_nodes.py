@@ -1483,6 +1483,105 @@ class MergeMasks:
         return (merged_mask,)
 
 
+class MergeMasksV2:
+    """支持多输入端及批量遮罩的合并节点"""
+
+    OPTIONAL_MASK_SLOTS = 8  # mask_2 ~ mask_9
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional_inputs = {
+            f"mask_{idx}": ("MASK",)
+            for idx in range(2, cls.OPTIONAL_MASK_SLOTS + 2)
+        }
+        optional_inputs["batched_masks"] = ("MASK",)
+        return {
+            "required": {
+                "mask_1": ("MASK",),
+            },
+            "optional": optional_inputs,
+        }
+
+    CATEGORY = "mask"
+    FUNCTION = "main"
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("merged_mask",)
+
+    def main(
+        self,
+        mask_1,
+        mask_2=None,
+        mask_3=None,
+        mask_4=None,
+        mask_5=None,
+        mask_6=None,
+        mask_7=None,
+        mask_8=None,
+        mask_9=None,
+        batched_masks=None,
+    ):
+        single_masks = []
+
+        def collect(mask):
+            if mask is None:
+                return
+            tensor = self._ensure_mask_tensor(mask)
+            if tensor.shape[0] == 1:
+                single_masks.append(tensor)
+            else:
+                for i in range(tensor.shape[0]):
+                    single_masks.append(tensor[i : i + 1])
+
+        for m in [
+            mask_1,
+            mask_2,
+            mask_3,
+            mask_4,
+            mask_5,
+            mask_6,
+            mask_7,
+            mask_8,
+            mask_9,
+        ]:
+            collect(m)
+
+        if batched_masks is not None:
+            batch_tensor = self._ensure_mask_tensor(batched_masks)
+            for i in range(batch_tensor.shape[0]):
+                single_masks.append(batch_tensor[i : i + 1])
+
+        if not single_masks:
+            raise ValueError("至少需要提供一个有效的遮罩用于合并。")
+
+        reference_shape = single_masks[0].shape
+        for tensor in single_masks:
+            if tensor.shape != reference_shape:
+                raise ValueError(
+                    f"所有遮罩尺寸需一致。参考尺寸为 {reference_shape}，收到 {tensor.shape}"
+                )
+
+        masks_tensor = torch.cat(single_masks, dim=0)  # (N, H, W)
+        merged_mask = torch.max(masks_tensor, dim=0)[0]
+        if merged_mask.dim() == 2:
+            merged_mask = merged_mask.unsqueeze(0)
+
+        return (merged_mask,)
+
+    def _ensure_mask_tensor(self, mask):
+        if not isinstance(mask, torch.Tensor):
+            mask = torch.tensor(mask)
+
+        if mask.dim() == 4:
+            # (N, 1, H, W) -> (N, H, W)
+            mask = mask.squeeze(1)
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+        if mask.dim() != 3:
+            raise ValueError(f"遮罩格式不正确，期望 (N, H, W)，得到 {mask.shape}")
+
+        return mask.to(dtype=torch.float32)
+
+
 class SelectLargestMask:
     """根据boxes面积筛选出最大的遮罩"""
     
@@ -1715,6 +1814,7 @@ NODE_CLASS_MAPPINGS = {
     "VisualizeDetectionBox": VisualizeDetectionBox,
     "FillMaskWithColor": FillMaskWithColor,
     "MergeMasks": MergeMasks,
+    "MergeMasksV2": MergeMasksV2,
     "SelectLargestMask": SelectLargestMask,
     "SelectLargestMaskByArea": SelectLargestMaskByArea,
 }
@@ -1732,6 +1832,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VisualizeDetectionBox": "可视化检测框",
     "FillMaskWithColor": "遮罩区域填充颜色",
     "MergeMasks": "合并遮罩",
+    "MergeMasksV2": "合并遮罩 V2",
     "SelectLargestMask": "筛选最大遮罩",
     "SelectLargestMaskByArea": "筛选最大遮罩（按面积）",
 }

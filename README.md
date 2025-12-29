@@ -64,6 +64,44 @@
 2. 将处理后的图片和遮罩直接输入此节点
 3. 享受简洁高效的替换效果
 
+### 智能物体替换 V3 (ImageReplaceWithMaskV3)
+在基础替换的基础上，增强“自适应扩展”和“白边控制”。
+
+**输入:**
+- `base_image`: 基础图片
+- `base_mask`: 基础图片遮罩（决定目标 bbox）
+- `replace_image`: 替换源图片
+- `replace_mask`(可选): 替换图遮罩；不提供则整图作为前景
+- `keep_aspect_ratio`: 是否保持宽高比
+- `cover_mode`: 覆盖模式（完全覆盖/完全适应）
+- `alignment`: 对齐方式（center/top/bottom/left/right）
+- `feather`: 羽化
+- `offset_left/right/up/down`: 位置微调
+- `allow_crop`: 是否允许裁切（当任一自适应开启时内部强制为 False）
+- `auto_expand_height`: 高度自适应扩展
+- `auto_expand_width`: 宽度自适应扩展
+- `enable_shrink_after_fit`: 是否在贴合 bbox 后再整体缩小
+- `shrink_ratio`: 缩小倍数（0.01-1.0，默认 0.7）
+
+**自适应模式说明（均不裁切原始内容，仅缩放 + 白边）:**
+- 高度 + 宽度 都开（严格模式）
+  - 同时以“物体尺寸”和“整图尺寸”约束缩放比，确保缩放后不超过 `base_mask` 的 bbox
+  - 可选再按 `shrink_ratio` 整体缩小，确保四周留白
+  - 将缩放后的替换图居中贴到“与 bbox 同尺寸”的白底画布上，四向自动补白
+  - 补白区域在内部被设置为前景，因此最终显示为纯白，不透明
+- 只开高度自适应
+  - 将替换图高度缩放到与 bbox 高度一致
+  - 若缩放后宽度小于 bbox 宽度，则左右补白到等宽；不裁切
+- 只开宽度自适应
+  - 以宽度为基准，按 bbox 的宽高比计算需要的高度，不足部分上下补白；不裁切
+
+**注意:**
+- V3 已移除 `expand_*` 参数；如需“画布外扩”，请使用 `ReplaceBackgroundWithWhiteExpand` 节点
+- V3 已移除 `scale_factor` 参数，避免与自适应/贴合后缩小的逻辑冲突
+
+**输出:**
+- `image`: 合成后的图片
+
 ### 4. 裁剪图片并替换背景为白色 (CropImageWithWhiteBackground)
 **新增节点**：根据遮罩裁剪图片，并将背景区域替换为白色，物体区域保持不变。
 
@@ -103,6 +141,26 @@
 
 **输出:**
 - `image`: 带边界框的图片
+
+### 6. 合并遮罩 V2 (MergeMasksV2)
+将多个来源（最多 9 条单独输入 + 1 个批量输入）的遮罩统一合并成一个遮罩，适用于多次 SAM/SAM3 推理获得不同语义的遮罩后，需要汇总到同一张图的场景。
+
+**输入:**
+- `mask_1`: 必填的首个遮罩输入
+- `mask_2` ~ `mask_9`: 可选遮罩输入口，可将不同节点的遮罩直接串联进来
+- `batched_masks`: 可选批量遮罩输入（形状 `(N, H, W)` 或 `(N, 1, H, W)`），便于直接接上批量输出节点
+
+**输出:**
+- `merged_mask`: 合并后的单个遮罩 `(1, H, W)`
+
+**特性:**
+- ✅ 同时支持多个独立输入口与批量输入，减少链路拆分
+- ✅ 自动将 2D / 4D 遮罩统一为 `(N, H, W)` 格式
+- ✅ 校验所有遮罩尺寸一致，避免隐藏错误
+- ✅ 通过 `torch.max` 求并集，完整保留每个遮罩的高亮区域
+
+**典型用法:**
+多个 SAM3 节点各自提取不同类别遮罩 → 全部连接到 `MergeMasksV2` → 输出总遮罩供后续处理（如替换、裁剪等）。
 
 ## 使用示例
 
@@ -164,7 +222,8 @@ paste_top = top + (target_height - overlay_height) // 2
 - torch
 - numpy
 - PIL (Pillow)
-- ComfyUI核心
+- opencv-python（由于内部使用 `cv2`）
+- ComfyUI 核心
 
 ## 安装
 
@@ -180,6 +239,17 @@ paste_top = top + (target_height - overlay_height) // 2
 4. **性能**: 大图片处理可能较慢，建议先调整图片大小
 
 ## 版本历史
+
+- v1.7.0: 新增 MergeMasksV2
+  - 新增 `MergeMasksV2` 节点，支持 9 条单遮罩输入与一条批量遮罩输入
+  - 自动校验并对齐遮罩尺寸，统一输出单个合并遮罩
+  - 适合多 SAM/SAM3 结果汇总后再进行替换或可视化
+
+- v1.6.0: V3 自适应增强与白边修复
+  - 新增 `ImageReplaceWithMaskV3` 的贴合后缩小：`enable_shrink_after_fit`、`shrink_ratio`
+  - 修复补白区域透明问题：补白区域 mask=1，保证最终显示为纯白
+  - 当自适应开启时：跳过合成阶段的初始缩放，并强制禁用裁切，避免二次干扰
+  - 从 V3 移除 `expand_*` 与 `scale_factor` 参数，UI 更简洁，行为更确定
 
 - v1.5.0: 添加对齐方式，精确控制裁剪
   - 新增 `alignment` 参数控制对齐和裁剪位置
