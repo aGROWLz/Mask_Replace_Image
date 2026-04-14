@@ -1,302 +1,70 @@
-# Mask Replace Image - 智能物体替换节点
+# Mask Replace Image
 
-这是一个ComfyUI自定义节点集合，用于智能检测、裁剪和替换图片中的物体。
+ComfyUI 自定义节点，用于智能检测、裁剪和替换图片中的物体。
 
-## 功能特性
+## 节点列表
 
-### 1. 提取遮罩边界框 (MaskBoundingBox)
-从遮罩中提取最上、最左、最右、最底边的矩形边界框。
+### MaskBoundingBox
+从遮罩中提取边界框坐标。
 
-**输入:**
-- `mask`: 遮罩
+**输入：** mask  
+**输出：** left, top, right, bottom
 
-**输出:**
-- `left`: 左边界坐标
-- `top`: 上边界坐标
-- `right`: 右边界坐标
-- `bottom`: 下边界坐标
+### CropImageByMask
+根据遮罩边界框裁剪图片。
 
-### 2. 按遮罩裁剪图片 (CropImageByMask)
-根据遮罩的边界框自动裁剪图片。
+**输入：** image, mask  
+**输出：** cropped_image, left, top, right, bottom
 
-**输入:**
-- `image`: 输入图片
-- `mask`: 遮罩
+### ImageReplaceWithMask
+智能物体替换核心节点。
 
-**输出:**
-- `cropped_image`: 裁剪后的图片
-- `left, top, right, bottom`: 边界框坐标
+**输入：** base_image, base_mask, replace_image, replace_mask(可选)  
+**参数：** keep_aspect_ratio, cover_mode, alignment, feather  
+**输出：** image
 
-### 3. 智能物体替换 (ImageReplaceWithMask)
-核心功能节点，实现智能物体替换。
+### ImageReplaceWithMaskV3
+增强版替换节点，支持自适应扩展和白边控制。
 
-**输入:**
-- `base_image`: 基础图片（要被替换的图片）
-- `base_mask`: 基础图片的遮罩（标识要替换的区域）
-- `replace_image`: 替换源图片（**推荐先用 CropImageWithWhiteBackground 预处理**）
-- `replace_mask`: （可选）替换图片的遮罩，如果不提供则使用整个图片
-- `keep_aspect_ratio`: 是否保持宽高比（默认: True）
-- `cover_mode`: 覆盖模式（默认: True）
-  - **True（完全覆盖）**: 缩放替换图以完全覆盖目标区域，可能裁剪超出部分 ✅ 推荐
-  - **False（完全适应）**: 缩放替换图完全适应目标区域，可能留有空白
-- `alignment`: 对齐方式（默认: bottom）
-  - **bottom**: 底部对齐（推荐，适合桌面物体替换）- 保留底边，裁剪顶边
-  - **top**: 顶部对齐 - 保留顶边，裁剪底边
-  - **center**: 居中对齐 - 居中裁剪
-  - **left**: 左对齐 - 保留左边，裁剪右边
-  - **right**: 右对齐 - 保留右边，裁剪左边
-- `feather`: 边缘羽化程度 (0-100，默认: 5)
+**新增参数：** offset_*, auto_expand_*, enable_shrink_after_fit, shrink_ratio
 
-**输出:**
-- `image`: 合成后的图片
+### CropImageWithWhiteBackground
+裁剪图片并将背景替换为白色。
 
-**特性:**
-- ✅ 自动提取目标区域边界框
-- ✅ 支持预处理好的替换图（白色背景）
-- ✅ replace_mask 为可选参数，简化工作流
-- ✅ 自适应缩放（保持比例或拉伸）
-- ✅ 居中对齐
-- ✅ 边缘羽化，无缝融合
-- ✅ 防止尺寸不匹配问题
+**输入：** image, mask  
+**参数：** background_alpha (0.0-1.0)  
+**输出：** image, mask
 
-**推荐工作流:**
-1. 使用 `CropImageWithWhiteBackground` 预处理替换源
-2. 将处理后的图片和遮罩直接输入此节点
-3. 享受简洁高效的替换效果
+### VisualizeDetectionBox
+绘制遮罩边界框用于调试。
 
-### 智能物体替换 V3 (ImageReplaceWithMaskV3)
-在基础替换的基础上，增强“自适应扩展”和“白边控制”。
+**输入：** image, mask  
+**参数：** box_color, box_width  
+**输出：** image
 
-**输入:**
-- `base_image`: 基础图片
-- `base_mask`: 基础图片遮罩（决定目标 bbox）
-- `replace_image`: 替换源图片
-- `replace_mask`(可选): 替换图遮罩；不提供则整图作为前景
-- `keep_aspect_ratio`: 是否保持宽高比
-- `cover_mode`: 覆盖模式（完全覆盖/完全适应）
-- `alignment`: 对齐方式（center/top/bottom/left/right）
-- `feather`: 羽化
-- `offset_left/right/up/down`: 位置微调
-- `allow_crop`: 是否允许裁切（当任一自适应开启时内部强制为 False）
-- `auto_expand_height`: 高度自适应扩展
-- `auto_expand_width`: 宽度自适应扩展
-- `enable_shrink_after_fit`: 是否在贴合 bbox 后再整体缩小
-- `shrink_ratio`: 缩小倍数（0.01-1.0，默认 0.7）
+### MergeMasksV2
+合并多个遮罩（支持 9 个独立输入 + 批量输入）。
 
-**自适应模式说明（均不裁切原始内容，仅缩放 + 白边）:**
-- 高度 + 宽度 都开（严格模式）
-  - 同时以“物体尺寸”和“整图尺寸”约束缩放比，确保缩放后不超过 `base_mask` 的 bbox
-  - 可选再按 `shrink_ratio` 整体缩小，确保四周留白
-  - 将缩放后的替换图居中贴到“与 bbox 同尺寸”的白底画布上，四向自动补白
-  - 补白区域在内部被设置为前景，因此最终显示为纯白，不透明
-- 只开高度自适应
-  - 将替换图高度缩放到与 bbox 高度一致
-  - 若缩放后宽度小于 bbox 宽度，则左右补白到等宽；不裁切
-- 只开宽度自适应
-  - 以宽度为基准，按 bbox 的宽高比计算需要的高度，不足部分上下补白；不裁切
+**输入：** mask_1 ~ mask_9, batched_masks(可选)  
+**输出：** merged_mask
 
-**注意:**
-- V3 已移除 `expand_*` 参数；如需“画布外扩”，请使用 `ReplaceBackgroundWithWhiteExpand` 节点
-- V3 已移除 `scale_factor` 参数，避免与自适应/贴合后缩小的逻辑冲突
-
-**输出:**
-- `image`: 合成后的图片
-
-### 4. 裁剪图片并替换背景为白色 (CropImageWithWhiteBackground)
-**新增节点**：根据遮罩裁剪图片，并将背景区域替换为白色，物体区域保持不变。
-
-**输入:**
-- `image`: 输入图片
-- `mask`: 遮罩（标识物体区域）
-- `background_alpha`: 背景透明度控制 (0.0-1.0，默认: 0.0) **← 控制背景白化程度**
-  - **0.0** = 背景完全变为白色（推荐，100%不透明白色）
-  - **0.5** = 背景半透明白化（原图50% + 白色50%）
-  - **1.0** = 背景保持原图（不处理）
-  - **注意**: 此参数仅影响背景（mask=0的区域），物体（mask=1的区域）始终保持不透明
-
-**输出:**
-- `image`: 处理后的图片（背景变白）
-- `mask`: 裁剪后的遮罩
-
-**特性:**
-- ✅ 根据遮罩边界框裁剪图片
-- ✅ 将背景区域替换为白色
-- ✅ 物体区域保持原样（不透明）
-- ✅ 可控背景透明度
-- ✅ 适合处理带有杂乱背景的产品图
-
-**使用场景:**
-- 预处理替换源图片，去除杂乱背景
-- 提取产品图并添加白色背景
-- 为 `ImageReplaceWithMask` 准备干净的替换源
-
-### 5. 可视化检测框 (VisualizeDetectionBox)
-在图片上绘制遮罩的边界框，用于调试和预览。
-
-**输入:**
-- `image`: 输入图片
-- `mask`: 遮罩
-- `box_color`: 边界框颜色（red/green/blue/yellow/white）
-- `box_width`: 边界框线宽 (1-20)
-
-**输出:**
-- `image`: 带边界框的图片
-
-### 6. 合并遮罩 V2 (MergeMasksV2)
-将多个来源（最多 9 条单独输入 + 1 个批量输入）的遮罩统一合并成一个遮罩，适用于多次 SAM/SAM3 推理获得不同语义的遮罩后，需要汇总到同一张图的场景。
-
-**输入:**
-- `mask_1`: 必填的首个遮罩输入
-- `mask_2` ~ `mask_9`: 可选遮罩输入口，可将不同节点的遮罩直接串联进来
-- `batched_masks`: 可选批量遮罩输入（形状 `(N, H, W)` 或 `(N, 1, H, W)`），便于直接接上批量输出节点
-
-**输出:**
-- `merged_mask`: 合并后的单个遮罩 `(1, H, W)`
-
-**特性:**
-- ✅ 同时支持多个独立输入口与批量输入，减少链路拆分
-- ✅ 自动将 2D / 4D 遮罩统一为 `(N, H, W)` 格式
-- ✅ 校验所有遮罩尺寸一致，避免隐藏错误
-- ✅ 通过 `torch.max` 求并集，完整保留每个遮罩的高亮区域
-
-**典型用法:**
-多个 SAM3 节点各自提取不同类别遮罩 → 全部连接到 `MergeMasksV2` → 输出总遮罩供后续处理（如替换、裁剪等）。
-
-## 使用示例
-
-### 基本工作流
+## 快速开始
 
 ```
-[原始图片] → [GroundingDINO检测] → [SAM分割] → [base_mask]
-                                                      ↓
-[替换图片] → [GroundingDINO检测] → [SAM分割] → [replace_mask]
-    ↓                                               ↓
-[replace_image]                                     ↓
-    ↓                                               ↓
-[原始图片] ──────────────────────────────────→ [智能物体替换]
-                                                      ↓
-                                                [输出图片]
+[原图] → [检测] → [分割] → [base_mask]
+                              ↓
+[替换图] → [预处理] --------→ [ImageReplaceWithMask] → [结果]
 ```
-
-### 典型应用场景
-
-1. **服装替换**: 检测人物和服装，替换为新的服装款式
-2. **产品替换**: 替换桌面上的产品
-3. **背景物体替换**: 替换场景中的特定物体
-4. **电商图片处理**: 自动化产品图片编辑
-
-## 工作原理
-
-1. **检测阶段**: 使用GroundingDINO + SAM检测并分割目标物体，生成精确遮罩
-2. **边界提取**: 从遮罩中提取最小包围矩形
-3. **物体裁剪**: 根据替换图的遮罩裁剪出目标物体
-4. **自适应缩放**: 
-   - 计算目标区域尺寸
-   - 按比例缩放替换物体以适配
-   - 如果替换图很小，会自动放大以覆盖目标区域
-5. **智能合成**: 
-   - 居中对齐
-   - 使用遮罩进行alpha混合
-   - 边缘羽化实现平滑过渡
-
-## 技术细节
-
-### 自适应缩放算法
-```python
-scale_w = target_width / source_width
-scale_h = target_height / source_height
-scale = min(scale_w, scale_h)  # 保持宽高比，确保完全覆盖
-```
-
-### 边缘羽化
-使用高斯模糊对遮罩边缘进行平滑处理，避免生硬的边界。
-
-### 居中对齐
-```python
-paste_left = left + (target_width - overlay_width) // 2
-paste_top = top + (target_height - overlay_height) // 2
-```
-
-## 依赖项
-
-- torch
-- numpy
-- PIL (Pillow)
-- opencv-python（由于内部使用 `cv2`）
-- ComfyUI 核心
 
 ## 安装
 
-1. 将此文件夹放入 `ComfyUI/custom_nodes/`
-2. 重启ComfyUI
-3. 节点将出现在"image"和"mask"分类下
+1. 放入 `ComfyUI/custom_nodes/`
+2. 重启 ComfyUI
 
-## 注意事项
+## 依赖
 
-1. **遮罩质量**: 遮罩质量直接影响替换效果，建议使用SAM等高质量分割模型
-2. **尺寸差异**: 节点会自动处理尺寸差异，但极端比例可能导致变形
-3. **羽化参数**: 羽化值过大可能导致边缘模糊，建议5-15之间
-4. **性能**: 大图片处理可能较慢，建议先调整图片大小
+torch, numpy, Pillow, opencv-python
 
-## 版本历史
+## 许可证
 
-- v1.7.0: 新增 MergeMasksV2
-  - 新增 `MergeMasksV2` 节点，支持 9 条单遮罩输入与一条批量遮罩输入
-  - 自动校验并对齐遮罩尺寸，统一输出单个合并遮罩
-  - 适合多 SAM/SAM3 结果汇总后再进行替换或可视化
-
-- v1.6.0: V3 自适应增强与白边修复
-  - 新增 `ImageReplaceWithMaskV3` 的贴合后缩小：`enable_shrink_after_fit`、`shrink_ratio`
-  - 修复补白区域透明问题：补白区域 mask=1，保证最终显示为纯白
-  - 当自适应开启时：跳过合成阶段的初始缩放，并强制禁用裁切，避免二次干扰
-  - 从 V3 移除 `expand_*` 与 `scale_factor` 参数，UI 更简洁，行为更确定
-
-- v1.5.0: 添加对齐方式，精确控制裁剪
-  - 新增 `alignment` 参数控制对齐和裁剪位置
-  - **bottom（底部对齐）**: 保留底边，裁剪顶边（默认，推荐）
-  - **top（顶部对齐）**: 保留顶边，裁剪底边
-  - **center（居中）**: 居中裁剪
-  - **left/right**: 左右对齐
-  - 解决完全覆盖模式下裁掉重要部分的问题
-  - 适合桌面物体替换等场景
-
-- v1.4.0: 添加覆盖模式，解决露出问题
-  - 新增 `cover_mode` 参数控制缩放行为
-  - **True（完全覆盖）**: 确保完全遮盖，不会露出原图物体 ✅
-  - **False（完全适应）**: 完整显示替换图，可能留空白
-  - 优化合成逻辑，正确处理超出边界的情况
-  - 默认使用完全覆盖模式，解决用户反馈的露出问题
-
-- v1.3.0: 简化工作流
-  - `ImageReplaceWithMask` 的 `replace_mask` 改为可选参数
-  - 移除 `ImageReplaceWithMask` 的 `background_alpha` 参数（建议使用预处理）
-  - 推荐先用 `CropImageWithWhiteBackground` 预处理替换源
-  - 更清晰的职责分离：预处理 → 替换
-  - 提升工作流的灵活性和可调试性
-
-- v1.2.0: 新增独立背景处理节点
-  - 新增 `CropImageWithWhiteBackground` 节点
-  - 独立处理替换源图片背景
-  - 支持预览和调试处理后的结果
-  - `background_alpha` 参数控制背景白化程度（0.0-1.0）
-  - 更可靠的背景白化处理
-
-- v1.1.0: 背景透明度控制
-  - 新增 `background_alpha` 参数控制替换源背景透明度
-  - 支持将背景设置为白色或保持原图
-  - 物体本身始终保持不透明，仅影响背景
-  
-- v1.0.0: 初始版本
-  - 基础边界框提取
-  - 智能物体替换
-  - 自适应缩放
-  - 边缘羽化
-
-## 授权
-
-MIT License
-
-## 作者
-
-AI Assistant - 为ComfyUI社区贡献
-
+MIT
