@@ -7,6 +7,8 @@ from .image_nodes.image_ops import (
     ReplaceBackgroundWithWhiteExpand,
     VisualizeDetectionBox,
     FillMaskWithColor,
+    CropImageWithPosition,
+    PasteCroppedImage,
 )
 
 # 合并所有节点
@@ -18,6 +20,8 @@ NODE_CLASS_MAPPINGS = {
     "ReplaceBackgroundWithWhiteExpand": ReplaceBackgroundWithWhiteExpand,
     "VisualizeDetectionBox": VisualizeDetectionBox,
     "FillMaskWithColor": FillMaskWithColor,
+    "CropImageWithPosition": CropImageWithPosition,
+    "PasteCroppedImage": PasteCroppedImage,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -28,6 +32,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ReplaceBackgroundWithWhiteExpand": "替换背景为白色（可扩展空白）",
     "VisualizeDetectionBox": "可视化检测框",
     "FillMaskWithColor": "遮罩区域填充颜色",
+    "CropImageWithPosition": "裁剪图像（带位置信息）",
+    "PasteCroppedImage": "贴回裁剪图像",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']

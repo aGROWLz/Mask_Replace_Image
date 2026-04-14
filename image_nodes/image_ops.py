@@ -544,3 +544,269 @@ class FillMaskWithColor:
         
         return (result_image,)
 
+
+class CropImageWithPosition:
+    """根据遮罩裁剪图像，支持四方向调整，输出裁剪信息和原图"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "mask": ("MASK",),
+                "expand_up": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999,
+                    "tooltip": "向上扩展裁剪区域（像素）"
+                }),
+                "expand_down": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999,
+                    "tooltip": "向下扩展裁剪区域（像素）"
+                }),
+                "expand_left": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999,
+                    "tooltip": "向左扩展裁剪区域（像素）"
+                }),
+                "expand_right": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999,
+                    "tooltip": "向右扩展裁剪区域（像素）"
+                }),
+                "force_square": ("BOOLEAN", {
+                    "default": False,
+                    "label_on": "强制1:1比例",
+                    "label_off": "保持原比例",
+                    "tooltip": "开启后会根据expand参数自动调整为正方形裁剪区域"
+                }),
+            }
+        }
+
+    CATEGORY = "image"
+    FUNCTION = "main"
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "STRING")
+    RETURN_NAMES = ("cropped_image", "cropped_mask", "original_image", "crop_position")
+
+    def main(self, image, mask, expand_up, expand_down, expand_left, expand_right, force_square):
+        """
+        根据遮罩裁剪图像，支持四方向调整
+
+        Args:
+            image: 输入图像
+            mask: 输入遮罩
+            expand_up: 向上扩展像素数
+            expand_down: 向下扩展像素数
+            expand_left: 向左扩展像素数
+            expand_right: 向右扩展像素数
+            force_square: 是否强制1:1比例
+
+        Returns:
+            cropped_image: 裁剪后的图像
+            cropped_mask: 裁剪后的遮罩（用于后续处理）
+            original_image: 原图（用于后续贴回）
+            crop_position: 裁剪位置信息（JSON格式）
+        """
+        import json
+        from ..mask_nodes.utils import get_mask_bounding_box
+
+        # 确保 mask 是 3D 的
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+
+        # 获取遮罩边界框
+        left, top, right, bottom = get_mask_bounding_box(mask)
+
+        if left == right or top == bottom:
+            # 遮罩为空，返回原图
+            position_info = json.dumps({
+                "left": 0,
+                "top": 0,
+                "right": image.shape[2] - 1,
+                "bottom": image.shape[1] - 1,
+                "original_width": image.shape[2],
+                "original_height": image.shape[1],
+                "is_empty": True
+            })
+            # 返回全0遮罩
+            empty_mask = torch.zeros(1, image.shape[1], image.shape[2], device=image.device, dtype=torch.float32)
+            return (image.clone(), empty_mask, image.clone(), position_info)
+
+        # 应用扩展
+        left = max(0, left - expand_left)
+        top = max(0, top - expand_up)
+        right = min(image.shape[2] - 1, right + expand_right)
+        bottom = min(image.shape[1] - 1, bottom + expand_down)
+
+        # 如果强制1:1比例，调整裁剪区域
+        if force_square:
+            # 计算当前裁剪区域的中心点
+            center_x = (left + right) // 2
+            center_y = (top + bottom) // 2
+
+            # 计算当前宽高
+            current_width = right - left + 1
+            current_height = bottom - top + 1
+
+            # 取较大的一边作为正方形边长
+            square_size = max(current_width, current_height)
+
+            # 以中心点为基准，计算新的正方形边界
+            half_size = square_size // 2
+            new_left = center_x - half_size
+            new_right = center_x + half_size
+            new_top = center_y - half_size
+            new_bottom = center_y + half_size
+
+            # 确保不超出原图边界
+            if new_left < 0:
+                new_right -= new_left
+                new_left = 0
+            if new_top < 0:
+                new_bottom -= new_top
+                new_top = 0
+            if new_right >= image.shape[2]:
+                new_left -= (new_right - image.shape[2] + 1)
+                new_right = image.shape[2] - 1
+            if new_bottom >= image.shape[1]:
+                new_top -= (new_bottom - image.shape[1] + 1)
+                new_bottom = image.shape[1] - 1
+
+            # 再次确保不越界
+            new_left = max(0, new_left)
+            new_top = max(0, new_top)
+            new_right = min(image.shape[2] - 1, new_right)
+            new_bottom = min(image.shape[1] - 1, new_bottom)
+
+            # 更新裁剪区域
+            left, top, right, bottom = new_left, new_top, new_right, new_bottom
+
+        # 裁剪图像和遮罩
+        cropped = image[:, top:bottom+1, left:right+1, :].clone()
+        cropped_mask = mask[:, top:bottom+1, left:right+1].clone()
+
+        # 保存位置信息
+        position_info = json.dumps({
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+            "original_width": image.shape[2],
+            "original_height": image.shape[1],
+            "cropped_width": cropped.shape[2],
+            "cropped_height": cropped.shape[1],
+            "is_empty": False,
+            "force_square": force_square
+        })
+
+        return (cropped, cropped_mask, image.clone(), position_info)
+
+
+class PasteCroppedImage:
+    """将处理后的裁剪图像贴回原图"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "processed_image": ("IMAGE",),
+                "original_image": ("IMAGE",),
+                "crop_position": ("STRING", {
+                    "multiline": True,
+                    "tooltip": "裁剪位置信息（JSON格式）"
+                }),
+                "feather": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 100,
+                    "step": 1,
+                    "tooltip": "边缘羽化像素数"
+                }),
+            }
+        }
+
+    CATEGORY = "image"
+    FUNCTION = "main"
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+
+    def main(self, processed_image, original_image, crop_position, feather):
+        """
+        将处理后的裁剪图像贴回原图
+
+        Args:
+            processed_image: 处理后的裁剪图像（比例相同，分辨率可能不同）
+            original_image: 原图
+            crop_position: 裁剪位置信息（JSON格式）
+            feather: 边缘羽化像素数
+
+        Returns:
+            贴回后的完整图像
+        """
+        import json
+        from PIL import Image, ImageFilter
+
+        # 解析位置信息
+        try:
+            pos = json.loads(crop_position)
+        except:
+            raise ValueError("crop_position 必须是有效的 JSON 字符串")
+
+        if pos.get("is_empty", False):
+            # 如果原裁剪区域为空，直接返回原图
+            return (original_image,)
+
+        left = pos["left"]
+        top = pos["top"]
+        right = pos["right"]
+        bottom = pos["bottom"]
+        original_width = pos["original_width"]
+        original_height = pos["original_height"]
+
+        # 目标区域的尺寸
+        target_width = right - left + 1
+        target_height = bottom - top + 1
+
+        # 处理后的图像尺寸
+        proc_h, proc_w = processed_image.shape[1], processed_image.shape[2]
+
+        # 将处理后的图像缩放到目标区域大小
+        if proc_h != target_height or proc_w != target_width:
+            # 转换为PIL进行缩放
+            proc_np = processed_image[0].cpu().numpy()
+            proc_np = (proc_np * 255).astype(np.uint8)
+            proc_pil = Image.fromarray(proc_np)
+            proc_pil = proc_pil.resize((target_width, target_height), Image.LANCZOS)
+            proc_np = np.array(proc_pil).astype(np.float32) / 255.0
+            processed_image = torch.from_numpy(proc_np)[None,].to(processed_image.device, processed_image.dtype)
+
+        # 创建输出图像（复制原图）
+        result = original_image.clone()
+
+        # 创建遮罩（用于羽化）
+        mask = torch.ones(1, target_height, target_width, device=original_image.device, dtype=torch.float32)
+
+        # 应用羽化
+        if feather > 0:
+            mask_np = mask[0].cpu().numpy()
+            mask_np = (mask_np * 255).astype(np.uint8)
+            mask_pil = Image.fromarray(mask_np)
+            mask_pil = mask_pil.filter(ImageFilter.GaussianBlur(feather))
+            mask_np = np.array(mask_pil).astype(np.float32) / 255.0
+            mask = torch.from_numpy(mask_np)[None,].to(original_image.device, torch.float32)
+
+        # 扩展到3通道
+        mask_3ch = mask.unsqueeze(-1).repeat(1, 1, 1, 3)
+
+        # 贴回图像
+        result[:, top:bottom+1, left:right+1, :] = (
+            original_image[:, top:bottom+1, left:right+1, :] * (1 - mask_3ch) +
+            processed_image * mask_3ch
+        )
+
+        return (result,)
+
