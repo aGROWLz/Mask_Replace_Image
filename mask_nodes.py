@@ -106,49 +106,90 @@ def resize_image_to_fit(
     cover_mode: bool = False
 ) -> torch.Tensor:
     """
-    调整图片大小以适配目标尺寸
-    
+    调整图片大小以适配目标尺寸（支持RGB和RGBA）
+
     Args:
-        source_image: 源图片张量 shape (1, H, W, C)
+        source_image: 源图片张量 shape (1, H, W, C) C=3或4
         target_width: 目标宽度
         target_height: 目标高度
         keep_aspect_ratio: 是否保持宽高比
         cover_mode: 覆盖模式 (True=完全覆盖可能裁剪, False=完全适应可能留空)
-    
+
     Returns:
         调整大小后的图片张量
     """
-    _, src_h, src_w, _ = source_image.shape
-    
+    _, src_h, src_w, src_c = source_image.shape
+
+    # 处理异常情况：如果输入图像尺寸为 1x1，直接返回目标尺寸的全1图像
+    if src_h == 1 and src_w == 1:
+        # 创建目标尺寸的全1图像
+        result = torch.ones(1, target_height, target_width, src_c, device=source_image.device, dtype=torch.float32)
+        return result
+
     if keep_aspect_ratio:
         # 计算缩放比例
         scale_w = target_width / src_w
         scale_h = target_height / src_h
-        
+
         # cover_mode: True使用max确保完全覆盖, False使用min确保完全适应
         if cover_mode:
             scale = max(scale_w, scale_h)  # 完全覆盖，可能超出
         else:
             scale = min(scale_w, scale_h)  # 完全适应，可能留空
-        
+
         new_w = int(src_w * scale)
         new_h = int(src_h * scale)
     else:
         new_w = target_width
         new_h = target_height
-    
-    # 转换为PIL图片
-    img_np = source_image[0].cpu().numpy()
-    img_np = (img_np * 255).astype(np.uint8)
-    pil_img = Image.fromarray(img_np)
-    
-    # 调整大小
-    pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
-    
-    # 转换回张量
-    img_np = np.array(pil_img).astype(np.float32) / 255.0
+
+    # 分离RGB和Alpha通道（如果有）
+    if src_c == 4:
+        img_rgb = source_image[0, :, :, :3].cpu().numpy()
+        img_alpha = source_image[0, :, :, 3:4].cpu().numpy()
+
+        img_rgb = (img_rgb * 255).astype(np.uint8)
+        img_alpha = (img_alpha * 255).astype(np.uint8)
+
+        pil_rgb = Image.fromarray(img_rgb)
+        pil_alpha = Image.fromarray(img_alpha.squeeze(-1))
+
+        # 调整大小
+        pil_rgb = pil_rgb.resize((new_w, new_h), Image.LANCZOS)
+        pil_alpha = pil_alpha.resize((new_w, new_h), Image.LANCZOS)
+
+        # 转换回张量
+        img_rgb_np = np.array(pil_rgb).astype(np.float32) / 255.0
+        img_alpha_np = np.array(pil_alpha).astype(np.float32) / 255.0
+
+        # 合并RGB和Alpha
+        img_np = np.concatenate([img_rgb_np, img_alpha_np[..., None]], axis=-1)
+    elif src_c == 1:
+        # 单通道图像（如Alpha通道）
+        img_np = source_image[0, :, :, 0].cpu().numpy()
+        img_np = (img_np * 255).astype(np.uint8)
+        pil_img = Image.fromarray(img_np)
+
+        # 调整大小
+        pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+
+        # 转换回张量，保持单通道
+        img_np = np.array(pil_img).astype(np.float32) / 255.0
+        img_np = img_np[..., None]  # 添加通道维度
+    else:
+        # 转换为PIL图片
+        img_np = source_image[0].cpu().numpy()
+        img_np = (img_np * 255).astype(np.uint8)
+        pil_img = Image.fromarray(img_np)
+
+        # 调整大小
+        pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+
+        # 转换回张量
+        img_np = np.array(pil_img).astype(np.float32) / 255.0
+
     img_tensor = torch.from_numpy(img_np)[None,]
-    
+
     return img_tensor
 
 
@@ -162,36 +203,78 @@ def composite_images(
     alignment: str = "center"
 ) -> torch.Tensor:
     """
-    将overlay图片合成到base图片的指定位置（基础版，与bak一致）
+    将overlay图片合成到base图片的指定位置（基础版，支持RGBA输入）
     """
     left, top, right, bottom = target_bbox
     target_width = right - left + 1
     target_height = bottom - top + 1
-    
-    resized_overlay = resize_image_to_fit(
-        overlay_image,
+
+    # 分离overlay的RGB和Alpha通道
+    _, ov_h, ov_w, ov_c = overlay_image.shape
+
+    # 处理异常情况：如果 overlay_image 的 H 或 W 为 1，可能是输入有问题
+    if ov_h == 1 and ov_w == 1 and ov_c >= 3:
+        # 这种情况通常是输入错误，创建一个默认的 RGB/RGBA 图像
+        if ov_c == 4:
+            overlay_rgb = torch.ones(1, 1, 1, 3, device=overlay_image.device, dtype=torch.float32)
+            overlay_alpha = torch.ones(1, 1, 1, 1, device=overlay_image.device, dtype=torch.float32)
+        else:
+            overlay_rgb = overlay_image
+            overlay_alpha = torch.ones(1, ov_h, ov_w, 1, device=overlay_image.device, dtype=torch.float32)
+    elif ov_c == 4:
+        overlay_rgb = overlay_image[:, :, :, :3]
+        overlay_alpha = overlay_image[:, :, :, 3:4]
+    else:
+        overlay_rgb = overlay_image
+        overlay_alpha = torch.ones(1, ov_h, ov_w, 1, device=overlay_image.device, dtype=torch.float32)
+
+    resized_overlay_rgb = resize_image_to_fit(
+        overlay_rgb,
         target_width,
         target_height,
         keep_aspect_ratio=True,
         cover_mode=cover_mode
     )
-    
-    _, overlay_h, overlay_w, _ = resized_overlay.shape
-    
+    resized_overlay_alpha = resize_image_to_fit(
+        overlay_alpha,
+        target_width,
+        target_height,
+        keep_aspect_ratio=True,
+        cover_mode=cover_mode
+    )
+
+    _, overlay_h, overlay_w, _ = resized_overlay_rgb.shape
+
+    # 处理遮罩 shape 和数据类型
+    if overlay_mask.dim() == 2:
+        overlay_mask = overlay_mask.unsqueeze(0)
+    elif overlay_mask.dim() == 3 and overlay_mask.shape[0] == 1:
+        pass  # 已经是 (1, H, W)
+    elif overlay_mask.dim() == 3 and overlay_mask.shape[1] == 1 and overlay_mask.shape[2] == 1:
+        # shape 是 (1, 1, 1) 这种特殊情况，扩展为全1遮罩
+        overlay_mask = torch.ones(1, overlay_h, overlay_w, device=overlay_mask.device, dtype=torch.float32)
+
+    # 确保遮罩是 float32 类型
+    if overlay_mask.dtype != torch.float32:
+        overlay_mask = overlay_mask.float()
+
     mask_np = overlay_mask[0].cpu().numpy()
     mask_np = (mask_np * 255).astype(np.uint8)
     mask_pil = Image.fromarray(mask_np)
     mask_pil = mask_pil.resize((overlay_w, overlay_h), Image.LANCZOS)
-    
+
     if feather > 0:
         from PIL import ImageFilter
         mask_pil = mask_pil.filter(ImageFilter.GaussianBlur(feather))
-    
+
     mask_np = np.array(mask_pil).astype(np.float32) / 255.0
     resized_mask = torch.from_numpy(mask_np)[None,]
-    
+
+    # 合并遮罩：输入遮罩 × overlay的alpha通道
+    combined_mask = resized_mask * resized_overlay_alpha.squeeze(-1)
+
     result = base_image.clone()
-    
+
     if cover_mode and (overlay_w > target_width or overlay_h > target_height):
         if alignment == "top":
             crop_top = 0
@@ -208,15 +291,15 @@ def composite_images(
         else:
             crop_left = max(0, (overlay_w - target_width) // 2)
             crop_top = max(0, (overlay_h - target_height) // 2)
-        
+
         crop_right = crop_left + min(overlay_w - crop_left, target_width)
         crop_bottom = crop_top + min(overlay_h - crop_top, target_height)
-        
-        resized_overlay = resized_overlay[:, crop_top:crop_bottom, crop_left:crop_right, :]
-        resized_mask = resized_mask[:, crop_top:crop_bottom, crop_left:crop_right]
-        
-        _, overlay_h, overlay_w, _ = resized_overlay.shape
-        
+
+        resized_overlay_rgb = resized_overlay_rgb[:, crop_top:crop_bottom, crop_left:crop_right, :]
+        combined_mask = combined_mask[:, crop_top:crop_bottom, crop_left:crop_right]
+
+        _, overlay_h, overlay_w, _ = resized_overlay_rgb.shape
+
         paste_left = left
         paste_top = top
     else:
@@ -235,15 +318,15 @@ def composite_images(
         else:
             paste_left = left + (target_width - overlay_w) // 2
             paste_top = top + (target_height - overlay_h) // 2
-        
+
         paste_left = max(0, min(paste_left, base_image.shape[2] - overlay_w))
         paste_top = max(0, min(paste_top, base_image.shape[1] - overlay_h))
-    
-    mask_3ch = resized_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
-    
+
+    mask_3ch = combined_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
+
     paste_h = min(overlay_h, base_image.shape[1] - paste_top)
     paste_w = min(overlay_w, base_image.shape[2] - paste_left)
-    
+
     result[
         :,
         paste_top:paste_top+paste_h,
@@ -256,9 +339,9 @@ def composite_images(
             paste_left:paste_left+paste_w,
             :
         ] * (1 - mask_3ch[:, :paste_h, :paste_w, :]) +
-        resized_overlay[:, :paste_h, :paste_w, :] * mask_3ch[:, :paste_h, :paste_w, :]
+        resized_overlay_rgb[:, :paste_h, :paste_w, :] * mask_3ch[:, :paste_h, :paste_w, :]
     )
-    
+
     return result
 
 
@@ -277,51 +360,103 @@ def composite_images_v2(
     skip_initial_resize: bool = False
 ) -> torch.Tensor:
     """
-    将overlay图片合成到base图片的指定位置（增强版，含偏移/缩放/裁切）
+    将overlay图片合成到base图片的指定位置（增强版，含偏移/缩放/裁切，支持RGBA输入）
     """
     left, top, right, bottom = target_bbox
     target_width = right - left + 1
     target_height = bottom - top + 1
-    
+
+    # 分离overlay的RGB和Alpha通道
+    _, ov_h, ov_w, ov_c = overlay_image.shape
+
+    # 处理异常情况：如果 overlay_image 的 H 或 W 为 1，可能是输入有问题
+    if ov_h == 1 and ov_w == 1 and ov_c >= 3:
+        # 这种情况通常是输入错误，创建一个默认的 RGB/RGBA 图像
+        if ov_c == 4:
+            overlay_rgb = torch.ones(1, 1, 1, 3, device=overlay_image.device, dtype=torch.float32)
+            overlay_alpha = torch.ones(1, 1, 1, 1, device=overlay_image.device, dtype=torch.float32)
+        else:
+            overlay_rgb = overlay_image
+            overlay_alpha = torch.ones(1, ov_h, ov_w, 1, device=overlay_image.device, dtype=torch.float32)
+    elif ov_c == 4:
+        overlay_rgb = overlay_image[:, :, :, :3]
+        overlay_alpha = overlay_image[:, :, :, 3:4]
+    else:
+        overlay_rgb = overlay_image
+        overlay_alpha = torch.ones(1, ov_h, ov_w, 1, device=overlay_image.device, dtype=torch.float32)
+
     if not skip_initial_resize:
-        resized_overlay = resize_image_to_fit(
-            overlay_image,
+        resized_overlay_rgb = resize_image_to_fit(
+            overlay_rgb,
+            target_width,
+            target_height,
+            keep_aspect_ratio=True,
+            cover_mode=cover_mode
+        )
+        resized_overlay_alpha = resize_image_to_fit(
+            overlay_alpha,
             target_width,
             target_height,
             keep_aspect_ratio=True,
             cover_mode=cover_mode
         )
     else:
-        resized_overlay = overlay_image
-    
+        resized_overlay_rgb = overlay_rgb
+        resized_overlay_alpha = overlay_alpha
+
     if scale_factor != 0.0:
-        _, overlay_h, overlay_w, _ = resized_overlay.shape
+        _, overlay_h, overlay_w, _ = resized_overlay_rgb.shape
         scale_multiplier = 1.0 + (scale_factor / 100.0)
         new_w = max(1, int(overlay_w * scale_multiplier))
         new_h = max(1, int(overlay_h * scale_multiplier))
-        img_np = resized_overlay[0].cpu().numpy()
-        img_np = (img_np * 255).astype(np.uint8)
-        pil_img = Image.fromarray(img_np)
-        pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
-        img_np = np.array(pil_img).astype(np.float32) / 255.0
-        resized_overlay = torch.from_numpy(img_np)[None,]
-    
-    _, overlay_h, overlay_w, _ = resized_overlay.shape
-    
+
+        # 分别缩放RGB和Alpha
+        img_rgb_np = resized_overlay_rgb[0].cpu().numpy()
+        img_rgb_np = (img_rgb_np * 255).astype(np.uint8)
+        pil_rgb = Image.fromarray(img_rgb_np)
+        pil_rgb = pil_rgb.resize((new_w, new_h), Image.LANCZOS)
+        img_rgb_np = np.array(pil_rgb).astype(np.float32) / 255.0
+        resized_overlay_rgb = torch.from_numpy(img_rgb_np)[None,]
+
+        img_alpha_np = resized_overlay_alpha[0].cpu().numpy()
+        img_alpha_np = (img_alpha_np * 255).astype(np.uint8)
+        pil_alpha = Image.fromarray(img_alpha_np.squeeze(-1))
+        pil_alpha = pil_alpha.resize((new_w, new_h), Image.LANCZOS)
+        img_alpha_np = np.array(pil_alpha).astype(np.float32) / 255.0
+        resized_overlay_alpha = torch.from_numpy(img_alpha_np)[None, ..., None]
+
+    _, overlay_h, overlay_w, _ = resized_overlay_rgb.shape
+
+    # 处理遮罩 shape，确保是 (1, H, W) 格式
+    if overlay_mask.dim() == 2:
+        overlay_mask = overlay_mask.unsqueeze(0)
+    elif overlay_mask.dim() == 3 and overlay_mask.shape[0] == 1:
+        pass  # 已经是 (1, H, W)
+    elif overlay_mask.dim() == 3 and overlay_mask.shape[1] == 1 and overlay_mask.shape[2] == 1:
+        # shape 是 (1, 1, 1) 这种特殊情况，扩展为全1遮罩
+        overlay_mask = torch.ones(1, overlay_h, overlay_w, device=overlay_mask.device, dtype=torch.float32)
+
+    # 确保遮罩是 float32 类型
+    if overlay_mask.dtype != torch.float32:
+        overlay_mask = overlay_mask.float()
+
     mask_np = overlay_mask[0].cpu().numpy()
     mask_np = (mask_np * 255).astype(np.uint8)
     mask_pil = Image.fromarray(mask_np)
     mask_pil = mask_pil.resize((overlay_w, overlay_h), Image.LANCZOS)
-    
+
     if feather > 0:
         from PIL import ImageFilter
         mask_pil = mask_pil.filter(ImageFilter.GaussianBlur(feather))
-    
+
     mask_np = np.array(mask_pil).astype(np.float32) / 255.0
     resized_mask = torch.from_numpy(mask_np)[None,]
-    
+
+    # 合并遮罩：输入遮罩 × overlay的alpha通道
+    combined_mask = resized_mask * resized_overlay_alpha.squeeze(-1)
+
     result = base_image.clone()
-    
+
     if cover_mode and allow_crop and (overlay_w > target_width or overlay_h > target_height):
         if alignment == "top":
             crop_top = 0
@@ -338,15 +473,15 @@ def composite_images_v2(
         else:
             crop_left = max(0, (overlay_w - target_width) // 2)
             crop_top = max(0, (overlay_h - target_height) // 2)
-        
+
         crop_right = crop_left + min(overlay_w - crop_left, target_width)
         crop_bottom = crop_top + min(overlay_h - crop_top, target_height)
-        
-        resized_overlay = resized_overlay[:, crop_top:crop_bottom, crop_left:crop_right, :]
-        resized_mask = resized_mask[:, crop_top:crop_bottom, crop_left:crop_right]
-        
-        _, overlay_h, overlay_w, _ = resized_overlay.shape
-        
+
+        resized_overlay_rgb = resized_overlay_rgb[:, crop_top:crop_bottom, crop_left:crop_right, :]
+        combined_mask = combined_mask[:, crop_top:crop_bottom, crop_left:crop_right]
+
+        _, overlay_h, overlay_w, _ = resized_overlay_rgb.shape
+
         paste_left = left
         paste_top = top
     else:
@@ -365,26 +500,26 @@ def composite_images_v2(
         else:
             paste_left = left + (target_width - overlay_w) // 2
             paste_top = top + (target_height - overlay_h) // 2
-    
+
     paste_left = paste_left + offset_x
     paste_top = paste_top + offset_y
-    
-    mask_3ch = resized_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
-    
+
+    mask_3ch = combined_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
+
     src_start_x = max(0, -paste_left)
     src_start_y = max(0, -paste_top)
     dst_start_x = max(0, paste_left)
     dst_start_y = max(0, paste_top)
-    
+
     paste_w = min(overlay_w - src_start_x, base_image.shape[2] - dst_start_x)
     paste_h = min(overlay_h - src_start_y, base_image.shape[1] - dst_start_y)
-    
+
     if paste_w <= 0 or paste_h <= 0:
         return result
-    
+
     final_paste_left = dst_start_x
     final_paste_top = dst_start_y
-    
+
     result[
         :,
         final_paste_top:final_paste_top+paste_h,
@@ -397,9 +532,9 @@ def composite_images_v2(
             final_paste_left:final_paste_left+paste_w,
             :
         ] * (1 - mask_3ch[:, src_start_y:src_start_y+paste_h, src_start_x:src_start_x+paste_w, :]) +
-        resized_overlay[:, src_start_y:src_start_y+paste_h, src_start_x:src_start_x+paste_w, :] * mask_3ch[:, src_start_y:src_start_y+paste_h, src_start_x:src_start_x+paste_w, :]
+        resized_overlay_rgb[:, src_start_y:src_start_y+paste_h, src_start_x:src_start_x+paste_w, :] * mask_3ch[:, src_start_y:src_start_y+paste_h, src_start_x:src_start_x+paste_w, :]
     )
-    
+
     return result
 
 
@@ -808,14 +943,14 @@ class ImageReplaceWithMaskV3:
                 _, _rh, _rw, _ = replace_image.shape
                 replace_h_obj, replace_w_obj = _rh, _rw
         
-        # 自适应扩展：先处理“高度+宽度都开”的完全贴合模式，然后是单独高度或单独宽度模式
+        # 自适应扩展：先处理"高度+宽度都开"的完全贴合模式，然后是单独高度或单独宽度模式
         def pad_image_and_mask(img, msk, pad_l, pad_r, pad_u, pad_d):
             if msk is None:
                 _, h, w, _ = img.shape
                 msk = torch.ones(1, h, w, device=img.device, dtype=img.dtype)
             if msk.dim() == 2:
                 msk = msk.unsqueeze(0)
-            _, h, w, _ = img.shape
+            _, h, w, c = img.shape
             new_w = w + pad_l + pad_r
             new_h = h + pad_u + pad_d
             new_w = max(1, new_w)
@@ -828,10 +963,24 @@ class ImageReplaceWithMaskV3:
             src_end_y = h - max(0, -pad_d)
             paste_width = src_end_x - src_start_x
             paste_height = src_end_y - src_start_y
-            white_bg = torch.ones(1, new_h, new_w, 3, device=img.device, dtype=img.dtype)
+
+            # 支持RGB和RGBA
+            if c == 4:
+                # RGBA: 白色背景RGB + 透明Alpha
+                white_bg = torch.ones(1, new_h, new_w, 3, device=img.device, dtype=img.dtype)
+                transparent_alpha = torch.zeros(1, new_h, new_w, 1, device=img.device, dtype=img.dtype)
+                if paste_width > 0 and paste_height > 0:
+                    white_bg[:, paste_y:paste_y+paste_height, paste_x:paste_x+paste_width, :] = img[:, src_start_y:src_end_y, src_start_x:src_end_x, :3]
+                    transparent_alpha[:, paste_y:paste_y+paste_height, paste_x:paste_x+paste_width, :] = img[:, src_start_y:src_end_y, src_start_x:src_end_x, 3:4]
+                # 合并RGB和Alpha
+                white_bg = torch.cat([white_bg, transparent_alpha], dim=-1)
+            else:
+                white_bg = torch.ones(1, new_h, new_w, 3, device=img.device, dtype=img.dtype)
+                if paste_width > 0 and paste_height > 0:
+                    white_bg[:, paste_y:paste_y+paste_height, paste_x:paste_x+paste_width, :] = img[:, src_start_y:src_end_y, src_start_x:src_end_x, :]
+
             new_mask = torch.zeros(1, new_h, new_w, device=msk.device, dtype=msk.dtype)
             if paste_width > 0 and paste_height > 0:
-                white_bg[:, paste_y:paste_y+paste_height, paste_x:paste_x+paste_width, :] = img[:, src_start_y:src_end_y, src_start_x:src_end_x, :]
                 new_mask[:, paste_y:paste_y+paste_height, paste_x:paste_x+paste_width] = msk[:, src_start_y:src_end_y, src_start_x:src_end_x]
             # 为了让补白区域在合成时显示为白色，需要让补白区域对应的mask为1
             # 计算补白区域：新画布减去粘贴区域的四个边带
@@ -851,12 +1000,30 @@ class ImageReplaceWithMaskV3:
                 new_mask[:, :, right_start:new_w] = 1
             return white_bg, new_mask
 
-        # 公共缩放函数（用于高度/宽度联合模式）
+        # 公共缩放函数（用于高度/宽度联合模式，支持RGBA）
         def resize_tensor_img(tensor_img, new_w, new_h):
-            np_img = (tensor_img[0].cpu().numpy() * 255).astype(np.uint8)
-            pil_img = Image.fromarray(np_img)
-            pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
-            np_img = np.array(pil_img).astype(np.float32) / 255.0
+            _, h, w, c = tensor_img.shape
+            if c == 4:
+                # RGBA: 分别缩放RGB和Alpha
+                img_rgb = (tensor_img[0, :, :, :3].cpu().numpy() * 255).astype(np.uint8)
+                img_alpha = (tensor_img[0, :, :, 3:4].cpu().numpy() * 255).astype(np.uint8)
+
+                pil_rgb = Image.fromarray(img_rgb)
+                pil_alpha = Image.fromarray(img_alpha.squeeze(-1))
+
+                pil_rgb = pil_rgb.resize((new_w, new_h), Image.LANCZOS)
+                pil_alpha = pil_alpha.resize((new_w, new_h), Image.LANCZOS)
+
+                np_rgb = np.array(pil_rgb).astype(np.float32) / 255.0
+                np_alpha = np.array(pil_alpha).astype(np.float32) / 255.0
+
+                np_img = np.concatenate([np_rgb, np_alpha[..., None]], axis=-1)
+            else:
+                np_img = (tensor_img[0].cpu().numpy() * 255).astype(np.uint8)
+                pil_img = Image.fromarray(np_img)
+                pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+                np_img = np.array(pil_img).astype(np.float32) / 255.0
+
             return torch.from_numpy(np_img)[None,].to(tensor_img.device, tensor_img.dtype)
         
         def resize_tensor_mask(msk, new_w, new_h):
@@ -868,7 +1035,7 @@ class ImageReplaceWithMaskV3:
 
         # 情况1：高度 + 宽度自适应都开启 -> 只允许缩放 + 白边，不裁切，最终画布严格贴合 base_mask 的 bbox
         if auto_expand_height and auto_expand_width and replace_h_obj > 0 and replace_w_obj > 0:
-            # 以物体尺寸为基准，计算统一缩放比例；同时保证“整图缩放后不会超过 target 尺寸”
+            # 以物体尺寸为基准，计算统一缩放比例；同时保证"整图缩放后不会超过 target 尺寸"
             _, rh, rw, _ = replace_image.shape
             scale_obj = min(target_width / replace_w_obj, target_height / replace_h_obj)
             scale_img = min(target_width / rw, target_height / rh)
@@ -915,7 +1082,7 @@ class ImageReplaceWithMaskV3:
                             replace_mask = replace_mask.unsqueeze(0)
                         replace_mask = resize_tensor_mask(replace_mask, new_w, new_h)
                     
-                    # 宽度自适应：按“物体”宽度而不是整图宽度来判断是否需要左右补白
+                    # 宽度自适应：按"物体"宽度而不是整图宽度来判断是否需要左右补白
                     # 重新计算缩放后物体在 replace_mask 中的 bbox
                     rb_l2, rb_t2, rb_r2, rb_b2 = get_mask_bounding_box(replace_mask)
                     obj_width_after = max(0, rb_r2 - rb_l2 + 1)
@@ -924,7 +1091,9 @@ class ImageReplaceWithMaskV3:
                         pad_total = target_width - new_w
                         pad_l = pad_total // 2
                         pad_r = pad_total - pad_l
-                    replace_image, replace_mask = pad_image_and_mask(replace_image, replace_mask, pad_l, pad_r, 0, 0)
+                    replace_image, replace_mask = pad_image_and_mask(
+                        replace_image, replace_mask, pad_l, pad_r, 0, 0
+                    )
         
         # 情况3：只开启宽度自适应 -> 宽度为基准，按比例补上下白边，使整体比例接近 base_mask
         if auto_expand_width and not auto_expand_height:
@@ -975,8 +1144,8 @@ class ImageReplaceWithMaskV3:
 
 
 class CropImageWithWhiteBackground:
-    """根据遮罩裁剪图片并将背景替换为白色"""
-    
+    """根据遮罩裁剪图片并将背景替换为白色，支持背景透明度控制"""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -992,56 +1161,75 @@ class CropImageWithWhiteBackground:
                 }),
             }
         }
-    
+
     CATEGORY = "image"
     FUNCTION = "main"
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("image", "mask")
-    
+
     def main(self, image, mask, background_alpha):
         """
-        根据遮罩裁剪图片并处理背景
-        
+        根据遮罩裁剪图片并处理背景透明度
+
         Args:
             image: 输入图片
             mask: 输入遮罩
-            background_alpha: 背景透明度 (0.0=白色, 1.0=原图)
-            
+            background_alpha: 背景透明度 (0.0=完全不透明白色, 1.0=完全透明)
+
         Returns:
-            处理后的图片和裁剪后的遮罩
+            处理后的图片(RGBA格式)和裁剪后的遮罩
         """
         # 确保 mask 是 3D 的 (1, H, W)
         if mask.dim() == 2:
             mask = mask.unsqueeze(0)
-        
+
         # 获取边界框
         left, top, right, bottom = get_mask_bounding_box(mask)
-        
+
         if left == right or top == bottom:
-            # 如果边界框无效，返回原图
-            return (image, mask)
-        
+            # 如果边界框无效，返回原图(转换为RGBA)
+            b, h, w, c = image.shape
+            if c == 3:
+                alpha = torch.ones(b, h, w, 1, device=image.device, dtype=image.dtype)
+                image_rgba = torch.cat([image, alpha], dim=-1)
+            else:
+                image_rgba = image
+            return (image_rgba, mask)
+
         # 裁剪图片和遮罩
         cropped_image = image[:, top:bottom+1, left:right+1, :].clone()
         cropped_mask = mask[:, top:bottom+1, left:right+1]
-        
-        # 扩展 mask 维度以匹配 RGB 通道
+
+        b, h, w, c = cropped_image.shape
+
+        # 创建白色背景 (RGB)
+        white_rgb = torch.ones(b, h, w, 3, device=cropped_image.device, dtype=cropped_image.dtype)
+
+        # 确保图像是RGB格式
+        if c == 4:
+            cropped_rgb = cropped_image[:, :, :, :3]
+        else:
+            cropped_rgb = cropped_image
+
+        # 扩展 mask 到 3 通道用于RGB混合
         mask_3ch = cropped_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
-        
-        # 创建白色背景
-        white_background = torch.ones_like(cropped_image)
-        
-        # 处理背景：
-        # - 物体区域 (mask=1): 保持原图
-        # - 背景区域 (mask=0): 根据 background_alpha 混合白色
-        #   background_alpha=0.0 -> 完全白色
-        #   background_alpha=1.0 -> 保持原图
-        result_image = (
-            cropped_image * mask_3ch +  # 前景：保持物体
-            (white_background * (1.0 - background_alpha) + cropped_image * background_alpha) * (1.0 - mask_3ch)  # 背景：混合
-        )
-        
-        return (result_image, cropped_mask)
+
+        # RGB部分：物体保持原图，背景使用白色
+        result_rgb = cropped_rgb * mask_3ch + white_rgb * (1.0 - mask_3ch)
+
+        # Alpha通道：物体不透明，背景根据background_alpha参数控制透明度
+        # mask=1(物体): alpha=1(不透明)
+        # mask=0(背景): alpha=(1-background_alpha)  注意：颠倒后的逻辑
+        # background_alpha=0 -> alpha=1 (不透明/白色)
+        # background_alpha=1 -> alpha=0 (透明)
+        bg_alpha = 1.0 - background_alpha
+        alpha_channel = cropped_mask * 1.0 + (1.0 - cropped_mask) * bg_alpha
+        alpha_channel = alpha_channel.unsqueeze(-1)  # (B, H, W, 1)
+
+        # 合并RGB和Alpha通道
+        result_rgba = torch.cat([result_rgb, alpha_channel], dim=-1)
+
+        return (result_rgba, cropped_mask)
 
 
 class ReplaceBackgroundWithWhite:
@@ -1107,8 +1295,8 @@ class ReplaceBackgroundWithWhite:
 
 
 class ReplaceBackgroundWithWhiteExpand:
-    """替换背景为白色，并可扩展空白区域以缩小遮罩物品占比"""
-    
+    """替换背景为白色，并可扩展空白区域以缩小遮罩物品占比，支持透明背景"""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -1144,103 +1332,141 @@ class ReplaceBackgroundWithWhiteExpand:
                     "max": 1.0,
                     "step": 0.01,
                     "display": "slider",
-                    "tooltip": "背景透明度 (0.0=完全白色, 1.0=保持原图)"
+                    "tooltip": "背景透明度 (0.0=完全不透明白色, 1.0=完全透明)"
                 }),
             },
             "optional": {
                 "mask": ("MASK",),
             }
         }
-    
+
     CATEGORY = "image"
     FUNCTION = "main"
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
-    
+
     def main(self, image, expand_up, expand_down, expand_left, expand_right, background_alpha, mask=None):
         """
         替换背景为白色，并向外扩展画布尺寸以缩小遮罩物品占比
-        
+
         Args:
-            image: 输入图片
+            image: 输入图片 (支持RGB或RGBA)
             expand_up: 向上扩展画布（正数向上扩展，负数反向扩展）
             expand_down: 向下扩展画布（正数向下扩展，负数反向扩展）
             expand_left: 向左扩展画布（正数向左扩展，负数反向扩展）
             expand_right: 向右扩展画布（正数向右扩展，负数反向扩展）
-            background_alpha: 背景透明度 (0.0=完全白色, 1.0=保持原图)
+            background_alpha: 背景透明度 (0.0=完全不透明白色, 1.0=完全透明)
             mask: 可选输入遮罩，如果提供则根据遮罩处理背景
-            
+
         Returns:
-            扩展后的图片（新尺寸）
+            扩展后的图片（RGBA格式，新尺寸）
         """
-        # 获取原图片尺寸
-        _, img_h, img_w, _ = image.shape
-        
+        # 获取原图片尺寸和通道数
+        _, img_h, img_w, img_c = image.shape
+
+        # 分离RGB和Alpha通道（如果有）
+        if img_c == 4:
+            image_rgb = image[:, :, :, :3]
+            image_alpha = image[:, :, :, 3:4]
+        else:
+            image_rgb = image
+            image_alpha = torch.ones(1, img_h, img_w, 1, device=image.device, dtype=image.dtype)
+
         # 计算新画布尺寸（向外扩展）
         new_width = img_w + expand_left + expand_right
         new_height = img_h + expand_up + expand_down
-        
+
         # 确保新尺寸至少为1
         new_width = max(1, new_width)
         new_height = max(1, new_height)
-        
-        # 创建新的白色画布
-        white_background = torch.ones(1, new_height, new_width, 3, device=image.device, dtype=image.dtype)
-        
+
+        # 创建新的白色画布 (RGB)
+        white_rgb = torch.ones(1, new_height, new_width, 3, device=image.device, dtype=image.dtype)
+        # 创建透明Alpha画布
+        transparent_alpha = torch.zeros(1, new_height, new_width, 1, device=image.device, dtype=image.dtype)
+
         # 计算原图片在新画布中的位置
-        # 如果expand_left为正，原图向右移动；如果为负，原图向左移动（需要裁剪左侧）
-        paste_x = max(0, expand_left)  # 原图在新画布中的x位置
-        paste_y = max(0, expand_up)    # 原图在新画布中的y位置
-        
+        paste_x = max(0, expand_left)
+        paste_y = max(0, expand_up)
+
         # 计算原图中要粘贴的区域
-        # 如果expand_left为负，需要裁剪原图左侧
-        src_start_x = max(0, -expand_left)   # 原图左侧裁剪量
-        src_start_y = max(0, -expand_up)     # 原图上方裁剪量
-        # 如果expand_right为负，需要裁剪原图右侧
-        src_end_x = img_w - max(0, -expand_right)   # 原图右侧保留到此处
-        src_end_y = img_h - max(0, -expand_down)     # 原图下方保留到此处
-        
+        src_start_x = max(0, -expand_left)
+        src_start_y = max(0, -expand_up)
+        src_end_x = img_w - max(0, -expand_right)
+        src_end_y = img_h - max(0, -expand_down)
+
         # 确保有效区域
         src_end_x = max(src_start_x, src_end_x)
         src_end_y = max(src_start_y, src_end_y)
-        
+
         # 计算粘贴尺寸
         paste_width = src_end_x - src_start_x
         paste_height = src_end_y - src_start_y
-        
+
         # 计算目标粘贴区域
         dst_start_x = paste_x
         dst_start_y = paste_y
         dst_end_x = paste_x + paste_width
         dst_end_y = paste_y + paste_height
-        
-        # 将原图片粘贴到新画布上
-        result_image = white_background.clone()
+
+        # 将原图片RGB粘贴到新画布上
+        result_rgb = white_rgb.clone()
+        # 将原图片Alpha粘贴到新画布上
+        result_alpha = transparent_alpha.clone()
+
         if paste_width > 0 and paste_height > 0:
-            result_image[
+            result_rgb[
                 :,
                 dst_start_y:dst_end_y,
                 dst_start_x:dst_end_x,
                 :
-            ] = image[
+            ] = image_rgb[
                 :,
                 src_start_y:src_end_y,
                 src_start_x:src_end_x,
                 :
             ]
-        
-        # 如果没有提供mask，直接返回扩展后的图片（背景已经是白色）
+            result_alpha[
+                :,
+                dst_start_y:dst_end_y,
+                dst_start_x:dst_end_x,
+                :
+            ] = image_alpha[
+                :,
+                src_start_y:src_end_y,
+                src_start_x:src_end_x,
+                :
+            ]
+
+        # 转换透明度：background_alpha=0(不透明) -> bg_alpha=1, background_alpha=1(透明) -> bg_alpha=0
+        bg_alpha = 1.0 - background_alpha
+
+        # 如果没有提供mask，直接返回扩展后的图片（背景根据background_alpha控制透明度）
         if mask is None:
-            return (result_image,)
-        
+            # 背景区域（新扩展的部分）使用background_alpha
+            # 创建一个遮罩表示原图区域
+            original_mask = torch.zeros(1, new_height, new_width, 1, device=image.device, dtype=image.dtype)
+            if paste_width > 0 and paste_height > 0:
+                original_mask[
+                    :,
+                    dst_start_y:dst_end_y,
+                    dst_start_x:dst_end_x,
+                    :
+                ] = 1.0
+
+            # Alpha通道：原图区域保持原alpha，新扩展区域使用bg_alpha
+            final_alpha = result_alpha * original_mask + bg_alpha * (1.0 - original_mask)
+            result_rgba = torch.cat([result_rgb, final_alpha], dim=-1)
+            return (result_rgba,)
+
         # 如果有mask，处理遮罩逻辑
         # 确保 mask 是 3D 的 (1, H, W)
         if mask.dim() == 2:
             mask = mask.unsqueeze(0)
-        
+
         # 创建扩展后的遮罩
         expanded_mask = torch.zeros(1, new_height, new_width, device=mask.device, dtype=mask.dtype)
-        
+
         # 将原遮罩粘贴到新位置（使用相同的粘贴区域）
         if paste_width > 0 and paste_height > 0:
             expanded_mask[
@@ -1252,21 +1478,23 @@ class ReplaceBackgroundWithWhiteExpand:
                 src_start_y:src_end_y,
                 src_start_x:src_end_x
             ]
-        
-        # 扩展 mask 维度以匹配 RGB 通道
+
+        # 扩展 mask 到 4 通道用于RGBA混合
         mask_3ch = expanded_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
-        
-        # 处理背景：
-        # - 物体区域 (mask=1): 保持原图
-        # - 背景区域 (mask=0): 根据 background_alpha 混合白色
-        #   background_alpha=0.0 -> 完全白色
-        #   background_alpha=1.0 -> 保持原图
-        result_image = (
-            result_image * mask_3ch +  # 前景：保持物体
-            (white_background * (1.0 - background_alpha) + result_image * background_alpha) * (1.0 - mask_3ch)  # 背景：混合
-        )
-        
-        return (result_image,)
+        mask_1ch = expanded_mask.unsqueeze(-1)  # (B, H, W, 1)
+
+        # RGB部分：物体区域保持原图，背景区域使用白色
+        result_rgb = result_rgb * mask_3ch + white_rgb * (1.0 - mask_3ch)
+
+        # Alpha通道：
+        # - 物体区域 (mask=1): 保持原alpha值（不透明）
+        # - 背景区域 (mask=0): 使用bg_alpha参数控制透明度
+        final_alpha = mask_1ch * 1.0 + (1.0 - mask_1ch) * bg_alpha
+
+        # 合并RGB和Alpha通道
+        result_rgba = torch.cat([result_rgb, final_alpha], dim=-1)
+
+        return (result_rgba,)
 
 
 class VisualizeDetectionBox:
@@ -1836,9 +2064,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SelectLargestMask": "筛选最大遮罩",
     "SelectLargestMaskByArea": "筛选最大遮罩（按面积）",
 }
-
-
-
 
 
 
