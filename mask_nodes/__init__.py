@@ -10,6 +10,7 @@ from .mask_ops import (
     MaskBoundingBox,
     MergeMasks,
     MergeMasksV2,
+    MergeMasksDelete,
     SelectLargestMask,
     SelectLargestMaskByArea,
 )
@@ -25,6 +26,7 @@ NODE_CLASS_MAPPINGS = {
     "MaskBoundingBox": MaskBoundingBox,
     "MergeMasks": MergeMasks,
     "MergeMasksV2": MergeMasksV2,
+    "MergeMasksDelete": MergeMasksDelete,
     "SelectLargestMask": SelectLargestMask,
     "SelectLargestMaskByArea": SelectLargestMaskByArea,
     "ImageReplaceWithMask": ImageReplaceWithMask,
@@ -37,6 +39,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MaskBoundingBox": "提取遮罩边界框",
     "MergeMasks": "合并遮罩",
     "MergeMasksV2": "合并遮罩 V2",
+    "MergeMasksDelete": "合并遮罩（删除）",
     "SelectLargestMask": "筛选最大遮罩",
     "SelectLargestMaskByArea": "筛选最大遮罩（按面积）",
     "ImageReplaceWithMask": "智能物体替换",

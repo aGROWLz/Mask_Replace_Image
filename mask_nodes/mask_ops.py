@@ -308,11 +308,11 @@ class SelectLargestMask:
                 areas.append(mask_area)
         
         # 找到面积最大的索引
-        if not areas:
-            # 如果没有有效的面积数据，返回第一个遮罩
-            largest_idx = 0
-        else:
-            largest_idx = int(np.argmax(areas))
+        if not areas or num_masks == 0:
+            # 如果没有遮罩或没有有效的面积数据，返回空遮罩
+            return (torch.zeros(1, 64, 64), -1)
+        
+        largest_idx = int(np.argmax(areas))
         
         # 提取最大的遮罩
         largest_mask = masks[largest_idx].unsqueeze(0)  # (H, W) -> (1, H, W)
@@ -355,6 +355,11 @@ class SelectLargestMaskByArea:
         
         if masks.dim() != 3:
             raise ValueError(f"遮罩格式不正确，期望 (N, H, W)，得到 {masks.shape}")
+        
+        # 检查是否有遮罩
+        if masks.shape[0] == 0:
+            # 如果没有遮罩，返回空遮罩
+            return (torch.zeros(1, 64, 64), -1)
         
         # 若只有单个遮罩，直接用连通域筛一遍
         if masks.shape[0] == 1:
@@ -406,3 +411,83 @@ class SelectLargestMaskByArea:
         
         largest = (labels == max_label).astype(np.float32)
         return torch.from_numpy(largest)
+
+
+class MergeMasksDelete:
+    """合并遮罩（删除）：从主遮罩中删除指定区域"""
+
+    OPTIONAL_MASK_SLOTS = 9  # mask_del_1 ~ mask_del_9
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional_inputs = {
+            f"mask_del_{idx}": ("MASK",)
+            for idx in range(1, cls.OPTIONAL_MASK_SLOTS + 1)
+        }
+        return {
+            "required": {
+                "mask": ("MASK",),
+            },
+            "optional": optional_inputs,
+        }
+
+    CATEGORY = "mask"
+    FUNCTION = "main"
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("result_mask",)
+
+    def main(
+        self,
+        mask,
+        mask_del_1=None,
+        mask_del_2=None,
+        mask_del_3=None,
+        mask_del_4=None,
+        mask_del_5=None,
+        mask_del_6=None,
+        mask_del_7=None,
+        mask_del_8=None,
+        mask_del_9=None,
+    ):
+        # 处理主遮罩
+        main_mask = self._ensure_3d(mask)
+
+        # 收集所有删除遮罩并取并集
+        del_masks = []
+        for m in [mask_del_1, mask_del_2, mask_del_3, mask_del_4,
+                   mask_del_5, mask_del_6, mask_del_7, mask_del_8, mask_del_9]:
+            if m is not None:
+                t = self._ensure_3d(m)
+                # 支持批量删除遮罩，逐个拆分
+                for i in range(t.shape[0]):
+                    del_masks.append(t[i:i+1])
+
+        result = main_mask
+        if del_masks:
+            # 将所有删除遮罩合并（取并集）
+            del_tensor = torch.cat(del_masks, dim=0)  # (N, H, W)
+            del_union = torch.max(del_tensor, dim=0)[0]  # (H, W)
+            del_union = del_union.unsqueeze(0)  # (1, H, W)
+
+            # 检查尺寸是否匹配
+            if del_union.shape[1:] != main_mask.shape[1:]:
+                raise ValueError(
+                    f"删除遮罩尺寸 {del_union.shape} 与主遮罩尺寸 {main_mask.shape} 不匹配"
+                )
+
+            # 从主遮罩中减去删除区域
+            result = torch.clamp(main_mask - del_union, 0.0, 1.0)
+
+        return (result,)
+
+    def _ensure_3d(self, mask):
+        """确保遮罩为 (N, H, W) 格式"""
+        if not isinstance(mask, torch.Tensor):
+            mask = torch.tensor(mask)
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+        elif mask.dim() == 4:
+            mask = mask.squeeze(1)
+        if mask.dim() != 3:
+            raise ValueError(f"遮罩格式不正确，期望 (N, H, W)，得到 {mask.shape}")
+        return mask.to(dtype=torch.float32)
