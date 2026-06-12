@@ -371,14 +371,14 @@ class ImageReplaceWithMaskV3:
 
             # 支持RGB和RGBA
             if c == 4:
-                # RGBA: 白色背景RGB + 透明Alpha
+                # RGBA: 白色背景RGB + 不透明Alpha（补白区域需要显示白色）
                 white_bg = torch.ones(1, new_h, new_w, 3, device=img.device, dtype=img.dtype)
-                transparent_alpha = torch.zeros(1, new_h, new_w, 1, device=img.device, dtype=img.dtype)
+                opaque_alpha = torch.ones(1, new_h, new_w, 1, device=img.device, dtype=img.dtype)  # 补白区域Alpha=1（不透明）
                 if paste_width > 0 and paste_height > 0:
                     white_bg[:, paste_y:paste_y+paste_height, paste_x:paste_x+paste_width, :] = img[:, src_start_y:src_end_y, src_start_x:src_end_x, :3]
-                    transparent_alpha[:, paste_y:paste_y+paste_height, paste_x:paste_x+paste_width, :] = img[:, src_start_y:src_end_y, src_start_x:src_end_x, 3:4]
+                    opaque_alpha[:, paste_y:paste_y+paste_height, paste_x:paste_x+paste_width, :] = img[:, src_start_y:src_end_y, src_start_x:src_end_x, 3:4]
                 # 合并RGB和Alpha
-                white_bg = torch.cat([white_bg, transparent_alpha], dim=-1)
+                white_bg = torch.cat([white_bg, opaque_alpha], dim=-1)
             else:
                 white_bg = torch.ones(1, new_h, new_w, 3, device=img.device, dtype=img.dtype)
                 if paste_width > 0 and paste_height > 0:
@@ -476,9 +476,14 @@ class ImageReplaceWithMaskV3:
             if replace_h_obj > 0:
                 scale_h = target_height / replace_h_obj
                 if scale_h > 0:
+                    # 应用缩小比例
+                    eff_ratio = shrink_ratio if enable_shrink_after_fit else 1.0
+                    eff_ratio = max(0.01, min(1.0, float(eff_ratio)))
+                    scale_h_final = scale_h * eff_ratio
+                    
                     _, rh, rw, _ = replace_image.shape
-                    new_h = target_height
-                    new_w = max(1, int(round(rw * scale_h)))
+                    new_h = max(1, int(round(target_height * eff_ratio)))
+                    new_w = max(1, int(round(rw * scale_h_final)))
                     replace_image = resize_tensor_img(replace_image, new_w, new_h)
                     if replace_mask is None:
                         replace_mask = torch.ones(1, new_h, new_w, device=replace_image.device, dtype=replace_image.dtype)
@@ -502,7 +507,22 @@ class ImageReplaceWithMaskV3:
         
         # 情况3：只开启宽度自适应 -> 宽度为基准，按比例补上下白边，使整体比例接近 base_mask
         if auto_expand_width and not auto_expand_height:
+            # 应用缩小比例
+            eff_ratio = shrink_ratio if enable_shrink_after_fit else 1.0
+            eff_ratio = max(0.01, min(1.0, float(eff_ratio)))
+            
             _, rh, rw, _ = replace_image.shape
+            # 先按缩小比例缩放替换图
+            if eff_ratio < 1.0:
+                new_rw = max(1, int(round(rw * eff_ratio)))
+                new_rh = max(1, int(round(rh * eff_ratio)))
+                replace_image = resize_tensor_img(replace_image, new_rw, new_rh)
+                if replace_mask is not None:
+                    if replace_mask.dim() == 2:
+                        replace_mask = replace_mask.unsqueeze(0)
+                    replace_mask = resize_tensor_mask(replace_mask, new_rw, new_rh)
+                _, rh, rw, _ = replace_image.shape
+            
             target_aspect = target_width / target_height if target_height > 0 else 1.0
             needed_h = int(round(rw / target_aspect)) if target_width > 0 else rh
             extra_h = max(0, needed_h - rh)
