@@ -1,6 +1,9 @@
 torch
 numpy
 Pillow
+opencv-python
+insightface
+onnxruntime
 
 
 
