@@ -7,6 +7,7 @@ from .image_ops import (
     FillMaskWithColor,
     CropImageWithPosition,
     PasteCroppedImage,
+    PasteCroppedImageWithEdgeMarker,
 )
 
 # 节点类映射
@@ -19,6 +20,7 @@ NODE_CLASS_MAPPINGS = {
     "FillMaskWithColor": FillMaskWithColor,
     "CropImageWithPosition": CropImageWithPosition,
     "PasteCroppedImage": PasteCroppedImage,
+    "PasteCroppedImageWithEdgeMarker": PasteCroppedImageWithEdgeMarker,
 }
 
 # 节点显示名称映射
@@ -31,6 +33,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FillMaskWithColor": "遮罩区域填充颜色",
     "CropImageWithPosition": "裁剪图像（带位置信息）",
     "PasteCroppedImage": "贴回裁剪图像",
+    "PasteCroppedImageWithEdgeMarker": "贴回裁剪图像（边缘标记）",
 }
 
 __all__ = [

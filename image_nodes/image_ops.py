@@ -810,3 +810,189 @@ class PasteCroppedImage:
 
         return (result,)
 
+
+class PasteCroppedImageWithEdgeMarker:
+    """将处理后的裁剪图像贴回原图，并在裁剪边缘生成标记遮罩和红色透明图层"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "processed_image": ("IMAGE",),
+                "original_image": ("IMAGE",),
+                "crop_position": ("STRING", {
+                    "multiline": True,
+                    "tooltip": "裁剪位置信息（JSON格式）"
+                }),
+                "feather": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 100,
+                    "step": 1,
+                    "tooltip": "边缘羽化像素数"
+                }),
+                "expand_outward": ("INT", {
+                    "default": 10,
+                    "min": 0,
+                    "max": 500,
+                    "step": 1,
+                    "tooltip": "标记区域向外扩展（像素），覆盖原图侧"
+                }),
+                "expand_inward": ("INT", {
+                    "default": 10,
+                    "min": 0,
+                    "max": 500,
+                    "step": 1,
+                    "tooltip": "标记区域向内扩展（像素），覆盖裁剪图侧"
+                }),
+                "marker_alpha": ("FLOAT", {
+                    "default": 0.3,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "display": "slider",
+                    "tooltip": "红色标记图层透明度"
+                }),
+                "mask_alpha": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "display": "slider",
+                    "tooltip": "边缘遮罩透明度（用于生图模型修复）"
+                }),
+            }
+        }
+
+    CATEGORY = "image"
+    FUNCTION = "main"
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE")
+    RETURN_NAMES = ("pasted_image", "edge_mask", "marked_image")
+
+    def main(self, processed_image, original_image, crop_position, feather,
+             expand_outward, expand_inward, marker_alpha, mask_alpha):
+        """
+        贴回裁剪图像并生成边缘标记
+
+        Args:
+            processed_image: 处理后的裁剪图像
+            original_image: 原图
+            crop_position: 裁剪位置信息（JSON格式）
+            feather: 边缘羽化像素数
+            expand_outward: 标记区域向外扩展像素
+            expand_inward: 标记区域向内扩展像素
+            marker_alpha: 红色标记图层透明度
+            mask_alpha: 边缘遮罩透明度
+
+        Returns:
+            pasted_image: 贴回后的完整图像
+            edge_mask: 边缘区域遮罩
+            marked_image: 带红色边缘标记的贴回图像（RGBA）
+        """
+        import json
+        from PIL import Image, ImageFilter
+
+        # --- 1. 解析位置信息 ---
+        try:
+            pos = json.loads(crop_position)
+        except Exception:
+            raise ValueError("crop_position 必须是有效的 JSON 字符串")
+
+        if pos.get("is_empty", False):
+            # 原裁剪区域为空，直接返回原图和空遮罩
+            empty_mask = torch.zeros(1, original_image.shape[1], original_image.shape[2],
+                                     device=original_image.device, dtype=torch.float32)
+            return (original_image.clone(), empty_mask, original_image.clone())
+
+        left = pos["left"]
+        top = pos["top"]
+        right = pos["right"]
+        bottom = pos["bottom"]
+        original_width = pos["original_width"]
+        original_height = pos["original_height"]
+
+        # --- 2. 缩放处理后图像到目标区域大小 ---
+        target_width = right - left + 1
+        target_height = bottom - top + 1
+        proc_h, proc_w = processed_image.shape[1], processed_image.shape[2]
+
+        if proc_h != target_height or proc_w != target_width:
+            proc_np = processed_image[0].cpu().numpy()
+            proc_np = (proc_np * 255).astype(np.uint8)
+            proc_pil = Image.fromarray(proc_np)
+            proc_pil = proc_pil.resize((target_width, target_height), Image.LANCZOS)
+            proc_np = np.array(proc_pil).astype(np.float32) / 255.0
+            processed_image = torch.from_numpy(proc_np)[None,].to(
+                original_image.device, original_image.dtype)
+
+        # --- 3. 贴回图像（与 PasteCroppedImage 相同逻辑）---
+        result = original_image.clone()
+
+        paste_mask = torch.ones(1, target_height, target_width,
+                                device=original_image.device, dtype=torch.float32)
+        if feather > 0:
+            mask_np = paste_mask[0].cpu().numpy()
+            mask_np = (mask_np * 255).astype(np.uint8)
+            mask_pil = Image.fromarray(mask_np)
+            mask_pil = mask_pil.filter(ImageFilter.GaussianBlur(feather))
+            mask_np = np.array(mask_pil).astype(np.float32) / 255.0
+            paste_mask = torch.from_numpy(mask_np)[None,].to(
+                original_image.device, torch.float32)
+
+        paste_mask_3ch = paste_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
+        result[:, top:bottom+1, left:right+1, :] = (
+            original_image[:, top:bottom+1, left:right+1, :] * (1 - paste_mask_3ch)
+            + processed_image * paste_mask_3ch
+        )
+
+        # --- 4. 计算边缘区域遮罩 ---
+        img_h, img_w = original_image.shape[1], original_image.shape[2]
+
+        # 外边界（向外扩展后）
+        outer_left = max(0, left - expand_outward)
+        outer_top = max(0, top - expand_outward)
+        outer_right = min(img_w - 1, right + expand_outward)
+        outer_bottom = min(img_h - 1, bottom + expand_outward)
+
+        # 内边界（向内收缩后）
+        inner_left = min(img_w - 1, left + expand_inward)
+        inner_top = min(img_h - 1, top + expand_inward)
+        inner_right = max(-1, right - expand_inward)
+        inner_bottom = max(-1, bottom - expand_inward)
+
+        # 创建边缘遮罩 (1, H, W)
+        edge_mask = torch.zeros(1, img_h, img_w,
+                                device=original_image.device, dtype=torch.float32)
+        edge_mask[:, outer_top:outer_bottom+1, outer_left:outer_right+1] = 1.0
+
+        # 挖掉内部区域，只保留边缘环带
+        if inner_left < inner_right and inner_top < inner_bottom:
+            edge_mask[:, inner_top:inner_bottom+1, inner_left:inner_right+1] = 0.0
+
+        # --- 5. 创建带红色标记的输出图像 ---
+        result_rgb = result[:, :, :, :3].clone()  # 只取RGB
+        _, h, w, _ = result_rgb.shape
+
+        # 红色标记图层: (1, H, W, 3)，值为 (1, 0, 0)
+        red_overlay = torch.zeros(1, h, w, 3, device=result.device, dtype=result.dtype)
+        red_overlay[:, :, :, 0] = 1.0  # R通道
+
+        # 扩展 edge_mask 到 3 通道
+        edge_mask_3ch = edge_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
+
+        # 混合: result * (1 - edge_mask * marker_alpha) + red * edge_mask * marker_alpha
+        marked_rgb = result_rgb * (1.0 - edge_mask_3ch * marker_alpha) \
+                     + red_overlay * edge_mask_3ch * marker_alpha
+
+        # 转为 RGBA，红色标记区域半透明
+        alpha = torch.ones(1, h, w, 1, device=result.device, dtype=result.dtype)
+        # 在边缘区域降低 alpha
+        edge_mask_1ch = edge_mask.unsqueeze(-1)  # (1, H, W, 1)
+        alpha = alpha * (1.0 - edge_mask_1ch * marker_alpha) + edge_mask_1ch * marker_alpha
+        marked_image = torch.cat([marked_rgb, alpha], dim=-1)
+
+        # --- 6. 应用 mask_alpha 到边缘遮罩输出 ---
+        edge_mask_output = edge_mask * mask_alpha
+
+        return (result, edge_mask_output, marked_image)
+

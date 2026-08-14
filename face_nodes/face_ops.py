@@ -4,10 +4,10 @@ import cv2
 
 
 class FaceReplaceWithLandmark:
-    """基于人脸关键点检测的智能换脸节点
+    """基于 insightface 106 点人脸关键点的智能换脸节点
 
     使用 insightface 检测两张图片的人脸关键点，
-    根据关键点自动计算缩放和旋转，将源人脸对齐后覆盖到目标人脸上。
+    根据关键点自动计算缩放/旋转/平移，将源人脸对齐后覆盖到目标人脸上。
     """
 
     _face_app = None
@@ -25,8 +25,17 @@ class FaceReplaceWithLandmark:
             os.makedirs(models_dir, exist_ok=True)
 
             cls._face_app = FaceAnalysis(name='buffalo_l', root=models_dir)
-            # ctx_id: 0 尝试 GPU，负数 CPU
             cls._face_app.prepare(ctx_id=0, det_size=(640, 640))
+
+            # 检测并打印实际使用的推理后端
+            import onnxruntime as ort
+            providers = ort.get_available_providers()
+            if 'CUDAExecutionProvider' in providers:
+                print("[FaceReplace] insightface 使用 GPU 推理 (CUDA)")
+            elif 'ROCMExecutionProvider' in providers:
+                print("[FaceReplace] insightface 使用 GPU 推理 (ROCm)")
+            else:
+                print("[FaceReplace] insightface 使用 CPU 推理")
         return cls._face_app
 
     @classmethod
@@ -53,10 +62,16 @@ class FaceReplaceWithLandmark:
                 "mask_expand": ("FLOAT", {
                     "default": 0.15,
                     "min": 0.0,
-                    "max": 0.5,
+                    "max": 2.0,
                     "step": 0.01,
                     "display": "slider",
-                    "tooltip": "遮罩向外扩展比例（相对人脸尺寸），0 表示只覆盖关键点轮廓"
+                    "tooltip": "遮罩向外扩展比例（相对人脸尺寸）"
+                }),
+                "enable_rotation": ("BOOLEAN", {
+                    "default": True,
+                    "label_on": "角度对齐",
+                    "label_off": "仅缩放平移",
+                    "tooltip": "开启后根据人脸关键点自动旋转对齐角度"
                 }),
             },
         }
@@ -66,7 +81,7 @@ class FaceReplaceWithLandmark:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("result_image",)
 
-    def main(self, target_image, source_image, feather, scale_adjust, mask_expand):
+    def main(self, target_image, source_image, feather, scale_adjust, mask_expand, enable_rotation):
         # ---- 步骤1: ComfyUI tensor → numpy uint8 BGR ----
         target_np = (target_image[0].cpu().numpy() * 255).astype(np.uint8)
         source_np = (source_image[0].cpu().numpy() * 255).astype(np.uint8)
@@ -80,7 +95,6 @@ class FaceReplaceWithLandmark:
         source_faces = app.get(source_bgr)
 
         if len(target_faces) == 0 or len(source_faces) == 0:
-            # 检测不到人脸时直接返回原图
             return (target_image.clone(),)
 
         # 取面积最大的人脸
@@ -90,17 +104,20 @@ class FaceReplaceWithLandmark:
         target_face = max(target_faces, key=face_area)
         source_face = max(source_faces, key=face_area)
 
-        # ---- 步骤3: 提取关键点 ----
-        src_kps = source_face.kps[:, :2].astype(np.float32)  # (5, 2)
+        # ---- 步骤3: 提取 5 个关键点 ----
+        src_kps = source_face.kps[:, :2].astype(np.float32)
         dst_kps = target_face.kps[:, :2].astype(np.float32)
 
-        # ---- 步骤4: 计算相似变换矩阵（自动处理大小脸缩放） ----
-        M, _ = cv2.estimateAffinePartial2D(src_kps, dst_kps, method=cv2.RANSAC)
+        # ---- 步骤4: 根据开关计算变换矩阵 ----
+        if enable_rotation:
+            M, _ = cv2.estimateAffinePartial2D(src_kps, dst_kps, method=cv2.RANSAC)
+        else:
+            M = self._estimate_scale_translate_only(src_kps, dst_kps)
 
         if M is None:
             return (target_image.clone(),)
 
-        # ---- 步骤5: 手动微调缩放（以源关键点中心为基准） ----
+        # ---- 步骤5: 手动微调缩放 ----
         if scale_adjust != 0.0:
             k = 1.0 + scale_adjust / 100.0
             old_M22 = M[:, :2].copy()
@@ -108,7 +125,7 @@ class FaceReplaceWithLandmark:
             src_center = np.mean(src_kps, axis=0)
             M[:, 2] += (1.0 - k) * (old_M22 @ src_center)
 
-        # ---- 步骤6: 生成源人脸遮罩（椭圆覆盖全脸包括额头） ----
+        # ---- 步骤6: 生成源人脸遮罩（椭圆覆盖全脸含额头） ----
         src_mask = self._create_source_mask(source_face, source_bgr.shape[:2], mask_expand)
 
         # ---- 步骤7: 用同一变换矩阵对齐源图和遮罩 ----
@@ -144,28 +161,43 @@ class FaceReplaceWithLandmark:
 
         return (result_tensor,)
 
+    # ==================== 工具方法 ====================
+
     def _create_source_mask(self, face, img_shape, expand_ratio):
         """根据源人脸的 bbox 生成椭圆遮罩，天然覆盖额头"""
         h, w = img_shape
         bbox = face.bbox.astype(np.int32)
         x1, y1, x2, y2 = bbox[:4]
 
-        # 椭圆中心即 bbox 中心
         center = ((x1 + x2) // 2, (y1 + y2) // 2)
         axes = ((x2 - x1) // 2, (y2 - y1) // 2)
 
         mask = np.zeros((h, w), dtype=np.float32)
         cv2.ellipse(mask, center, axes, 0, 0, 360, 1.0, -1)
 
-        # 扩展遮罩
+        # 扩张遮罩
         face_h = y2 - y1
-        expand_px = int(face_h * expand_ratio)
-        if expand_px > 0:
-            kernel_size = max(3, expand_px)
-            kernel = cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE,
-                (kernel_size, kernel_size)
-            )
-            mask = cv2.dilate(mask, kernel, iterations=1)
+        expand_px = max(3, int(face_h * expand_ratio))
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (expand_px, expand_px)
+        )
+        mask = cv2.dilate(mask, kernel, iterations=1)
 
         return mask
+
+    @staticmethod
+    def _estimate_scale_translate_only(src_kps, dst_kps):
+        """仅计算缩放+平移（无旋转），保留源人脸原始角度"""
+        src_center = np.mean(src_kps, axis=0)
+        dst_center = np.mean(dst_kps, axis=0)
+
+        src_dist = np.mean([np.linalg.norm(p - src_center) for p in src_kps])
+        dst_dist = np.mean([np.linalg.norm(p - dst_center) for p in dst_kps])
+        scale = dst_dist / src_dist if src_dist > 0 else 1.0
+
+        M = np.zeros((2, 3), dtype=np.float32)
+        M[0, 0] = scale
+        M[1, 1] = scale
+        M[0, 2] = dst_center[0] - scale * src_center[0]
+        M[1, 2] = dst_center[1] - scale * src_center[1]
+        return M
