@@ -811,6 +811,92 @@ class PasteCroppedImage:
         return (result,)
 
 
+class MaskToCropPosition:
+    """将遮罩转换为裁剪位置信息（crop_position JSON 字符串）"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mask": ("MASK",),
+                "image_width": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 99999,
+                    "step": 1,
+                    "tooltip": "原图宽度；为 0 时使用遮罩自身宽度"
+                }),
+                "image_height": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 99999,
+                    "step": 1,
+                    "tooltip": "原图高度；为 0 时使用遮罩自身高度"
+                }),
+            }
+        }
+
+    CATEGORY = "image"
+    FUNCTION = "main"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("crop_position",)
+
+    def main(self, mask, image_width, image_height):
+        """
+        将遮罩转换为 crop_position（JSON 字符串）
+
+        Args:
+            mask: 输入遮罩
+            image_width: 原图宽度（0 则用遮罩宽度）
+            image_height: 原图高度（0 则用遮罩高度）
+
+        Returns:
+            crop_position JSON 字符串
+        """
+        import json
+
+        if mask.dim() == 3:
+            mask = mask.squeeze(0)
+
+        mask_np = mask.cpu().numpy()
+        rows = np.any(mask_np > 0, axis=1)
+        cols = np.any(mask_np > 0, axis=0)
+
+        if not np.any(rows) or not np.any(cols):
+            w = int(image_width) if image_width > 0 else int(mask_np.shape[1])
+            h = int(image_height) if image_height > 0 else int(mask_np.shape[0])
+            pos = {
+                "left": 0,
+                "top": 0,
+                "right": w - 1,
+                "bottom": h - 1,
+                "original_width": w,
+                "original_height": h,
+                "is_empty": True,
+            }
+            return (json.dumps(pos),)
+
+        top = int(np.argmax(rows))
+        bottom = int(len(rows) - np.argmax(rows[::-1]) - 1)
+        left = int(np.argmax(cols))
+        right = int(len(cols) - np.argmax(cols[::-1]) - 1)
+
+        w = int(image_width) if image_width > 0 else int(mask_np.shape[1])
+        h = int(image_height) if image_height > 0 else int(mask_np.shape[0])
+
+        pos = {
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+            "original_width": w,
+            "original_height": h,
+            "is_empty": False,
+        }
+
+        return (json.dumps(pos),)
+
+
 class PasteCroppedImageWithEdgeMarker:
     """将处理后的裁剪图像贴回原图，并在裁剪边缘生成标记遮罩和红色透明图层"""
 
@@ -820,10 +906,6 @@ class PasteCroppedImageWithEdgeMarker:
             "required": {
                 "processed_image": ("IMAGE",),
                 "original_image": ("IMAGE",),
-                "crop_position": ("STRING", {
-                    "multiline": True,
-                    "tooltip": "裁剪位置信息（JSON格式）"
-                }),
                 "feather": ("INT", {
                     "default": 0,
                     "min": 0,
@@ -861,6 +943,15 @@ class PasteCroppedImageWithEdgeMarker:
                     "display": "slider",
                     "tooltip": "边缘遮罩透明度（用于生图模型修复）"
                 }),
+            },
+            "optional": {
+                "crop_position": ("STRING", {
+                    "multiline": True,
+                    "tooltip": "裁剪位置信息（JSON格式），与 mask 二选一"
+                }),
+                "mask": ("MASK", {
+                    "tooltip": "边缘标记遮罩，沿其周边生成标记；与 crop_position 二选一"
+                }),
             }
         }
 
@@ -869,8 +960,9 @@ class PasteCroppedImageWithEdgeMarker:
     RETURN_TYPES = ("IMAGE", "MASK", "IMAGE")
     RETURN_NAMES = ("pasted_image", "edge_mask", "marked_image")
 
-    def main(self, processed_image, original_image, crop_position, feather,
-             expand_outward, expand_inward, marker_alpha, mask_alpha):
+    def main(self, processed_image, original_image, feather,
+             expand_outward, expand_inward, marker_alpha, mask_alpha,
+             crop_position=None, mask=None):
         """
         贴回裁剪图像并生成边缘标记
 
@@ -892,24 +984,40 @@ class PasteCroppedImageWithEdgeMarker:
         import json
         from PIL import Image, ImageFilter
 
-        # --- 1. 解析位置信息 ---
-        try:
-            pos = json.loads(crop_position)
-        except Exception:
-            raise ValueError("crop_position 必须是有效的 JSON 字符串")
+        img_h, img_w = original_image.shape[1], original_image.shape[2]
 
-        if pos.get("is_empty", False):
-            # 原裁剪区域为空，直接返回原图和空遮罩
-            empty_mask = torch.zeros(1, original_image.shape[1], original_image.shape[2],
-                                     device=original_image.device, dtype=torch.float32)
-            return (original_image.clone(), empty_mask, original_image.clone())
+        # --- 1. 解析位置信息（优先 crop_position，其次由 mask 计算）---
+        if crop_position is not None and crop_position.strip():
+            try:
+                pos = json.loads(crop_position)
+            except Exception:
+                raise ValueError("crop_position 必须是有效的 JSON 字符串")
 
-        left = pos["left"]
-        top = pos["top"]
-        right = pos["right"]
-        bottom = pos["bottom"]
-        original_width = pos["original_width"]
-        original_height = pos["original_height"]
+            if pos.get("is_empty", False):
+                empty_mask = torch.zeros(1, img_h, img_w,
+                                         device=original_image.device, dtype=torch.float32)
+                return (original_image.clone(), empty_mask, original_image.clone())
+
+            left = pos["left"]
+            top = pos["top"]
+            right = pos["right"]
+            bottom = pos["bottom"]
+        elif mask is not None:
+            if mask.dim() == 3:
+                mask = mask.squeeze(0)
+            mask_np = mask.cpu().numpy()
+            rows = np.any(mask_np > 0, axis=1)
+            cols = np.any(mask_np > 0, axis=0)
+            if not np.any(rows) or not np.any(cols):
+                empty_mask = torch.zeros(1, img_h, img_w,
+                                         device=original_image.device, dtype=torch.float32)
+                return (original_image.clone(), empty_mask, original_image.clone())
+            top = int(np.argmax(rows))
+            bottom = int(len(rows) - np.argmax(rows[::-1]) - 1)
+            left = int(np.argmax(cols))
+            right = int(len(cols) - np.argmax(cols[::-1]) - 1)
+        else:
+            raise ValueError("必须提供 crop_position 或 mask 其中之一")
 
         # --- 2. 缩放处理后图像到目标区域大小 ---
         target_width = right - left + 1
@@ -946,8 +1054,6 @@ class PasteCroppedImageWithEdgeMarker:
         )
 
         # --- 4. 计算边缘区域遮罩 ---
-        img_h, img_w = original_image.shape[1], original_image.shape[2]
-
         # 外边界（向外扩展后）
         outer_left = max(0, left - expand_outward)
         outer_top = max(0, top - expand_outward)
