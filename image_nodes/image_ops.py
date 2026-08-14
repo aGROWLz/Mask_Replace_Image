@@ -897,6 +897,146 @@ class MaskToCropPosition:
         return (json.dumps(pos),)
 
 
+class MaskEdgeMarker:
+    """沿遮罩边缘生成标记遮罩和红色标记图层（无贴回功能）"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "mask": ("MASK",),
+                "expand_outward": ("INT", {
+                    "default": 10,
+                    "min": 0,
+                    "max": 500,
+                    "step": 1,
+                    "tooltip": "标记区域向外扩展（像素），覆盖遮罩外侧"
+                }),
+                "expand_inward": ("INT", {
+                    "default": 10,
+                    "min": 0,
+                    "max": 500,
+                    "step": 1,
+                    "tooltip": "标记区域向内扩展（像素），覆盖遮罩内侧"
+                }),
+                "marker_alpha": ("FLOAT", {
+                    "default": 0.3,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "display": "slider",
+                    "tooltip": "红色标记图层透明度"
+                }),
+                "mask_alpha": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "display": "slider",
+                    "tooltip": "边缘遮罩透明度（用于生图模型修复）"
+                }),
+            }
+        }
+
+    CATEGORY = "image"
+    FUNCTION = "main"
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("marked_image", "edge_mask")
+
+    def main(self, image, mask, expand_outward, expand_inward,
+             marker_alpha, mask_alpha):
+        """
+        沿遮罩边缘生成红色标记图层和边缘遮罩
+
+        Args:
+            image: 输入图像
+            mask: 输入遮罩（标记沿其边缘生成）
+            expand_outward: 标记区域向外扩展像素
+            expand_inward: 标记区域向内扩展像素
+            marker_alpha: 红色标记图层透明度
+            mask_alpha: 边缘遮罩透明度
+
+        Returns:
+            marked_image: 带红色边缘标记的图像（RGBA）
+            edge_mask: 边缘区域遮罩
+        """
+        img_h, img_w = image.shape[1], image.shape[2]
+
+        # --- 1. 计算遮罩边界框 ---
+        if mask.dim() == 3:
+            mask = mask.squeeze(0)
+        mask_np = mask.cpu().numpy()
+        rows = np.any(mask_np > 0, axis=1)
+        cols = np.any(mask_np > 0, axis=0)
+
+        if not np.any(rows) or not np.any(cols):
+            empty_mask = torch.zeros(1, img_h, img_w,
+                                     device=image.device, dtype=torch.float32)
+            # 无有效遮罩时，返回原图（转RGBA）和空遮罩
+            b, h, w, c = image.shape
+            if c == 3:
+                alpha = torch.ones(b, h, w, 1, device=image.device, dtype=image.dtype)
+                image_rgba = torch.cat([image, alpha], dim=-1)
+            else:
+                image_rgba = image
+            return (image_rgba, empty_mask)
+
+        top = int(np.argmax(rows))
+        bottom = int(len(rows) - np.argmax(rows[::-1]) - 1)
+        left = int(np.argmax(cols))
+        right = int(len(cols) - np.argmax(cols[::-1]) - 1)
+
+        # --- 2. 计算边缘区域遮罩 ---
+        # 外边界（向外扩展后）
+        outer_left = max(0, left - expand_outward)
+        outer_top = max(0, top - expand_outward)
+        outer_right = min(img_w - 1, right + expand_outward)
+        outer_bottom = min(img_h - 1, bottom + expand_outward)
+
+        # 内边界（向内收缩后）
+        inner_left = min(img_w - 1, left + expand_inward)
+        inner_top = min(img_h - 1, top + expand_inward)
+        inner_right = max(-1, right - expand_inward)
+        inner_bottom = max(-1, bottom - expand_inward)
+
+        # 创建边缘遮罩 (1, H, W)
+        edge_mask = torch.zeros(1, img_h, img_w,
+                                device=image.device, dtype=torch.float32)
+        edge_mask[:, outer_top:outer_bottom+1, outer_left:outer_right+1] = 1.0
+
+        # 挖掉内部区域，只保留边缘环带
+        if inner_left < inner_right and inner_top < inner_bottom:
+            edge_mask[:, inner_top:inner_bottom+1, inner_left:inner_right+1] = 0.0
+
+        # --- 3. 创建带红色标记的输出图像 ---
+        result_rgb = image[:, :, :, :3].clone()  # 只取RGB
+        _, h, w, _ = result_rgb.shape
+
+        # 红色标记图层: (1, H, W, 3)，值为 (1, 0, 0)
+        red_overlay = torch.zeros(1, h, w, 3, device=image.device, dtype=image.dtype)
+        red_overlay[:, :, :, 0] = 1.0  # R通道
+
+        # 扩展 edge_mask 到 3 通道
+        edge_mask_3ch = edge_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
+
+        # 混合: result * (1 - edge_mask * marker_alpha) + red * edge_mask * marker_alpha
+        marked_rgb = result_rgb * (1.0 - edge_mask_3ch * marker_alpha) \
+                     + red_overlay * edge_mask_3ch * marker_alpha
+
+        # 转为 RGBA，红色标记区域半透明
+        alpha = torch.ones(1, h, w, 1, device=image.device, dtype=image.dtype)
+        # 在边缘区域降低 alpha
+        edge_mask_1ch = edge_mask.unsqueeze(-1)  # (1, H, W, 1)
+        alpha = alpha * (1.0 - edge_mask_1ch * marker_alpha) + edge_mask_1ch * marker_alpha
+        marked_image = torch.cat([marked_rgb, alpha], dim=-1)
+
+        # --- 4. 应用 mask_alpha 到边缘遮罩输出 ---
+        edge_mask_output = edge_mask * mask_alpha
+
+        return (marked_image, edge_mask_output)
+
+
 class PasteCroppedImageWithEdgeMarker:
     """将处理后的裁剪图像贴回原图，并在裁剪边缘生成标记遮罩和红色透明图层"""
 
