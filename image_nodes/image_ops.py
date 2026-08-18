@@ -123,6 +123,134 @@ class CropImageWithWhiteBackground:
 
         return (result_rgba, cropped_mask)
 
+class CropImageWithWhiteBackgroundV2:
+    """根据遮罩裁剪图片并将背景替换为白色，支持背景透明度控制和强制1:1裁剪"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "mask": ("MASK",),
+                "background_alpha": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "display": "slider"
+                }),
+                "force_square": ("BOOLEAN", {
+                    "default": False,
+                    "label_on": "强制1:1",
+                    "label_off": "保持原比例",
+                    "tooltip": "开启后将裁剪区域扩展为正方形（1:1比例）"
+                }),
+            }
+        }
+
+    CATEGORY = "image"
+    FUNCTION = "main"
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("image", "mask")
+
+    def main(self, image, mask, background_alpha, force_square):
+        """
+        根据遮罩裁剪图片并处理背景透明度，可强制1:1裁剪
+
+        Args:
+            image: 输入图片
+            mask: 输入遮罩
+            background_alpha: 背景透明度 (0.0=完全不透明白色, 1.0=完全透明)
+            force_square: 是否强制1:1裁剪
+
+        Returns:
+            处理后的图片(RGBA格式)和裁剪后的遮罩
+        """
+        # 确保 mask 是 3D 的 (1, H, W)
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+
+        # 获取边界框
+        left, top, right, bottom = get_mask_bounding_box(mask)
+
+        if left == right or top == bottom:
+            # 如果边界框无效，返回原图(转换为RGBA)
+            b, h, w, c = image.shape
+            if c == 3:
+                alpha = torch.ones(b, h, w, 1, device=image.device, dtype=image.dtype)
+                image_rgba = torch.cat([image, alpha], dim=-1)
+            else:
+                image_rgba = image
+            return (image_rgba, mask)
+
+        # 如果强制1:1比例，调整裁剪区域为正方形
+        if force_square:
+            img_h, img_w = image.shape[1], image.shape[2]
+            center_x = (left + right) // 2
+            center_y = (top + bottom) // 2
+            current_width = right - left + 1
+            current_height = bottom - top + 1
+            square_size = max(current_width, current_height)
+            half_size = square_size // 2
+
+            new_left = center_x - half_size
+            new_right = center_x + half_size
+            new_top = center_y - half_size
+            new_bottom = center_y + half_size
+
+            # 确保不超出原图边界
+            if new_left < 0:
+                new_right -= new_left
+                new_left = 0
+            if new_top < 0:
+                new_bottom -= new_top
+                new_top = 0
+            if new_right >= img_w:
+                new_left -= (new_right - img_w + 1)
+                new_right = img_w - 1
+            if new_bottom >= img_h:
+                new_top -= (new_bottom - img_h + 1)
+                new_bottom = img_h - 1
+
+            # 再次确保不越界
+            new_left = max(0, new_left)
+            new_top = max(0, new_top)
+            new_right = min(img_w - 1, new_right)
+            new_bottom = min(img_h - 1, new_bottom)
+
+            left, top, right, bottom = new_left, new_top, new_right, new_bottom
+
+        # 裁剪图片和遮罩
+        cropped_image = image[:, top:bottom+1, left:right+1, :].clone()
+        cropped_mask = mask[:, top:bottom+1, left:right+1]
+
+        b, h, w, c = cropped_image.shape
+
+        # 创建白色背景 (RGB)
+        white_rgb = torch.ones(b, h, w, 3, device=cropped_image.device, dtype=cropped_image.dtype)
+
+        # 确保图像是RGB格式
+        if c == 4:
+            cropped_rgb = cropped_image[:, :, :, :3]
+        else:
+            cropped_rgb = cropped_image
+
+        # 扩展 mask 到 3 通道用于RGB混合
+        mask_3ch = cropped_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
+
+        # RGB部分：物体保持原图，背景使用白色
+        result_rgb = cropped_rgb * mask_3ch + white_rgb * (1.0 - mask_3ch)
+
+        # Alpha通道：物体不透明，背景根据background_alpha参数控制透明度
+        bg_alpha = 1.0 - background_alpha
+        alpha_channel = cropped_mask * 1.0 + (1.0 - cropped_mask) * bg_alpha
+        alpha_channel = alpha_channel.unsqueeze(-1)  # (B, H, W, 1)
+
+        # 合并RGB和Alpha通道
+        result_rgba = torch.cat([result_rgb, alpha_channel], dim=-1)
+
+        return (result_rgba, cropped_mask)
+
 class ReplaceBackgroundWithWhite:
     """只替换背景为白色，不裁剪图片"""
     
@@ -1069,6 +1197,10 @@ class PasteCroppedImageWithEdgeMarker:
                     "display": "slider",
                     "tooltip": "红色标记图层透明度"
                 }),
+                "edge_mode": (["smart", "single_mask", "single_rect", "merged"], {
+                    "default": "smart",
+                    "tooltip": "边缘标记模式：smart=接入processed_mask用mask否则用矩形；single_mask=只用mask轮廓；single_rect=只用矩形框；merged=矩形与mask并集叠加"
+                }),
                 "mask_alpha": ("FLOAT", {
                     "default": 1.0,
                     "min": 0.0,
@@ -1086,6 +1218,9 @@ class PasteCroppedImageWithEdgeMarker:
                 "mask": ("MASK", {
                     "tooltip": "边缘标记遮罩，沿其周边生成标记；与 crop_position 二选一"
                 }),
+                "processed_mask": ("MASK", {
+                    "tooltip": "裁剪图对应的物体遮罩（裁剪图坐标系）。接入后边缘标记沿其真实轮廓生成，替代矩形标记"
+                }),
             }
         }
 
@@ -1095,8 +1230,8 @@ class PasteCroppedImageWithEdgeMarker:
     RETURN_NAMES = ("pasted_image", "edge_mask", "marked_image")
 
     def main(self, processed_image, original_image, feather,
-             expand_outward, expand_inward, marker_alpha, mask_alpha,
-             crop_position=None, mask=None):
+             expand_outward, expand_inward, marker_alpha, edge_mode, mask_alpha,
+             crop_position=None, mask=None, processed_mask=None):
         """
         贴回裁剪图像并生成边缘标记
 
@@ -1108,7 +1243,10 @@ class PasteCroppedImageWithEdgeMarker:
             expand_outward: 标记区域向外扩展像素
             expand_inward: 标记区域向内扩展像素
             marker_alpha: 红色标记图层透明度
+            edge_mode: 边缘标记模式（smart/single_mask/single_rect/merged）
             mask_alpha: 边缘遮罩透明度
+            processed_mask: 裁剪图对应的物体遮罩（裁剪图坐标系），
+                            接入后边缘标记沿其真实轮廓生成
 
         Returns:
             pasted_image: 贴回后的完整图像
@@ -1188,26 +1326,70 @@ class PasteCroppedImageWithEdgeMarker:
         )
 
         # --- 4. 计算边缘区域遮罩 ---
-        # 外边界（向外扩展后）
+        # 4a. 矩形裁剪框标记（始终可计算）
         outer_left = max(0, left - expand_outward)
         outer_top = max(0, top - expand_outward)
         outer_right = min(img_w - 1, right + expand_outward)
         outer_bottom = min(img_h - 1, bottom + expand_outward)
 
-        # 内边界（向内收缩后）
         inner_left = min(img_w - 1, left + expand_inward)
         inner_top = min(img_h - 1, top + expand_inward)
         inner_right = max(-1, right - expand_inward)
         inner_bottom = max(-1, bottom - expand_inward)
 
-        # 创建边缘遮罩 (1, H, W)
-        edge_mask = torch.zeros(1, img_h, img_w,
+        rect_mask = torch.zeros(1, img_h, img_w,
                                 device=original_image.device, dtype=torch.float32)
-        edge_mask[:, outer_top:outer_bottom+1, outer_left:outer_right+1] = 1.0
-
-        # 挖掉内部区域，只保留边缘环带
+        rect_mask[:, outer_top:outer_bottom+1, outer_left:outer_right+1] = 1.0
         if inner_left < inner_right and inner_top < inner_bottom:
-            edge_mask[:, inner_top:inner_bottom+1, inner_left:inner_right+1] = 0.0
+            rect_mask[:, inner_top:inner_bottom+1, inner_left:inner_right+1] = 0.0
+
+        # 4b. mask 真实轮廓标记（仅在接入 processed_mask 时计算）
+        contour_mask = None
+        if processed_mask is not None:
+            pm = processed_mask
+            if pm.dim() == 3:
+                pm = pm.squeeze(0)
+            pm_np = pm.cpu().numpy()
+            if pm_np.ndim > 2:
+                pm_np = pm_np[0]
+            pm_np = (pm_np > 0.5).astype(np.uint8)
+
+            if pm_np.shape[1] != target_width or pm_np.shape[0] != target_height:
+                pm_pil = Image.fromarray(pm_np * 255)
+                pm_pil = pm_pil.resize((target_width, target_height), Image.NEAREST)
+                pm_np = (np.array(pm_pil) > 127).astype(np.uint8)
+
+            binary_full = np.zeros((img_h, img_w), dtype=np.uint8)
+            binary_full[top:bottom+1, left:right+1] = pm_np
+
+            dilated = binary_full
+            if expand_outward > 0:
+                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                              (expand_outward * 2 + 1, expand_outward * 2 + 1))
+                dilated = cv2.dilate(binary_full, k, iterations=1)
+
+            eroded = binary_full
+            if expand_inward > 0:
+                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                              (expand_inward * 2 + 1, expand_inward * 2 + 1))
+                eroded = cv2.erode(binary_full, k, iterations=1)
+
+            edge_np = np.clip(dilated.astype(np.int16) - eroded.astype(np.int16), 0, 1).astype(np.float32)
+            contour_mask = torch.from_numpy(edge_np)[None,].to(
+                original_image.device, torch.float32)
+
+        # 4c. 根据 edge_mode 选择/合并
+        if edge_mode == "single_rect":
+            edge_mask = rect_mask
+        elif edge_mode == "single_mask":
+            edge_mask = contour_mask if contour_mask is not None else rect_mask
+        elif edge_mode == "merged":
+            if contour_mask is not None:
+                edge_mask = torch.clamp(rect_mask + contour_mask, 0.0, 1.0)
+            else:
+                edge_mask = rect_mask
+        else:  # smart：接入 processed_mask 用 mask，否则用矩形
+            edge_mask = contour_mask if contour_mask is not None else rect_mask
 
         # --- 5. 创建带红色标记的输出图像 ---
         result_rgb = result[:, :, :, :3].clone()  # 只取RGB

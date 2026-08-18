@@ -1,6 +1,7 @@
 from .image_ops import (
     CropImageByMask,
     CropImageWithWhiteBackground,
+    CropImageWithWhiteBackgroundV2,
     ReplaceBackgroundWithWhite,
     ReplaceBackgroundWithWhiteExpand,
     VisualizeDetectionBox,
@@ -16,6 +17,7 @@ from .image_ops import (
 NODE_CLASS_MAPPINGS = {
     "CropImageByMask": CropImageByMask,
     "CropImageWithWhiteBackground": CropImageWithWhiteBackground,
+    "CropImageWithWhiteBackgroundV2": CropImageWithWhiteBackgroundV2,
     "ReplaceBackgroundWithWhite": ReplaceBackgroundWithWhite,
     "ReplaceBackgroundWithWhiteExpand": ReplaceBackgroundWithWhiteExpand,
     "VisualizeDetectionBox": VisualizeDetectionBox,
@@ -31,6 +33,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "CropImageByMask": "按遮罩裁剪图片",
     "CropImageWithWhiteBackground": "裁剪图片并替换背景为白色",
+    "CropImageWithWhiteBackgroundV2": "裁剪图片并替换背景为白色（V2，可强制1:1）",
     "ReplaceBackgroundWithWhite": "只替换背景为白色",
     "ReplaceBackgroundWithWhiteExpand": "替换背景为白色（可扩展空白）",
     "VisualizeDetectionBox": "可视化检测框",
