@@ -12,6 +12,7 @@ from .image_ops import (
     MaskToCropPosition,
     MaskEdgeMarker,
 )
+from .color_match import ImageColorMatch
 
 # 节点类映射
 NODE_CLASS_MAPPINGS = {
@@ -27,6 +28,7 @@ NODE_CLASS_MAPPINGS = {
     "PasteCroppedImageWithEdgeMarker": PasteCroppedImageWithEdgeMarker,
     "MaskToCropPosition": MaskToCropPosition,
     "MaskEdgeMarker": MaskEdgeMarker,
+    "ImageColorMatch-mask": ImageColorMatch,
 }
 
 # 节点显示名称映射
@@ -43,6 +45,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PasteCroppedImageWithEdgeMarker": "贴回裁剪图像（边缘标记）",
     "MaskToCropPosition": "遮罩转裁剪位置",
     "MaskEdgeMarker": "遮罩边缘标记",
+    "ImageColorMatch-mask": "图像颜色匹配（遮罩）",
 }
 
 __all__ = [

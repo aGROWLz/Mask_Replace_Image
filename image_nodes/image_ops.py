@@ -1209,6 +1209,10 @@ class PasteCroppedImageWithEdgeMarker:
                     "display": "slider",
                     "tooltip": "边缘遮罩透明度（用于生图模型修复）"
                 }),
+                "marker_color": ("STRING", {
+                    "default": "#ff0000",
+                    "tooltip": "标记颜色（十六进制颜色码，如 #ff0000）"
+                }),
             },
             "optional": {
                 "crop_position": ("STRING", {
@@ -1231,7 +1235,7 @@ class PasteCroppedImageWithEdgeMarker:
 
     def main(self, processed_image, original_image, feather,
              expand_outward, expand_inward, marker_alpha, edge_mode, mask_alpha,
-             crop_position=None, mask=None, processed_mask=None):
+             marker_color, crop_position=None, mask=None, processed_mask=None):
         """
         贴回裁剪图像并生成边缘标记
 
@@ -1245,6 +1249,7 @@ class PasteCroppedImageWithEdgeMarker:
             marker_alpha: 红色标记图层透明度
             edge_mode: 边缘标记模式（smart/single_mask/single_rect/merged）
             mask_alpha: 边缘遮罩透明度
+            marker_color: 标记颜色（十六进制颜色码）
             processed_mask: 裁剪图对应的物体遮罩（裁剪图坐标系），
                             接入后边缘标记沿其真实轮廓生成
 
@@ -1391,22 +1396,35 @@ class PasteCroppedImageWithEdgeMarker:
         else:  # smart：接入 processed_mask 用 mask，否则用矩形
             edge_mask = contour_mask if contour_mask is not None else rect_mask
 
-        # --- 5. 创建带红色标记的输出图像 ---
+        # --- 5. 创建带颜色标记的输出图像 ---
         result_rgb = result[:, :, :, :3].clone()  # 只取RGB
         _, h, w, _ = result_rgb.shape
 
-        # 红色标记图层: (1, H, W, 3)，值为 (1, 0, 0)
-        red_overlay = torch.zeros(1, h, w, 3, device=result.device, dtype=result.dtype)
-        red_overlay[:, :, :, 0] = 1.0  # R通道
+        # 解析标记颜色（十六进制颜色码，如 #ff0000）
+        color_hex = marker_color.strip().lstrip('#')
+        if len(color_hex) != 6:
+            raise ValueError(f"marker_color 必须是 6 位十六进制颜色码，如 #ff0000，当前为: {marker_color}")
+        try:
+            r = int(color_hex[0:2], 16) / 255.0
+            g = int(color_hex[2:4], 16) / 255.0
+            b = int(color_hex[4:6], 16) / 255.0
+        except ValueError:
+            raise ValueError(f"marker_color 包含非法字符，应为十六进制颜色码: {marker_color}")
+
+        # 颜色标记图层: (1, H, W, 3)
+        marker_overlay = torch.zeros(1, h, w, 3, device=result.device, dtype=result.dtype)
+        marker_overlay[:, :, :, 0] = r  # R通道
+        marker_overlay[:, :, :, 1] = g  # G通道
+        marker_overlay[:, :, :, 2] = b  # B通道
 
         # 扩展 edge_mask 到 3 通道
         edge_mask_3ch = edge_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
 
-        # 混合: result * (1 - edge_mask * marker_alpha) + red * edge_mask * marker_alpha
+        # 混合: result * (1 - edge_mask * marker_alpha) + marker * edge_mask * marker_alpha
         marked_rgb = result_rgb * (1.0 - edge_mask_3ch * marker_alpha) \
-                     + red_overlay * edge_mask_3ch * marker_alpha
+                     + marker_overlay * edge_mask_3ch * marker_alpha
 
-        # 转为 RGBA，红色标记区域半透明
+        # 转为 RGBA，标记区域半透明
         alpha = torch.ones(1, h, w, 1, device=result.device, dtype=result.dtype)
         # 在边缘区域降低 alpha
         edge_mask_1ch = edge_mask.unsqueeze(-1)  # (1, H, W, 1)
