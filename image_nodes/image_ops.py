@@ -835,6 +835,128 @@ class CropImageWithPosition:
         return (cropped, cropped_mask, image.clone(), position_info)
 
 
+class CropImageWithPositionV2(CropImageWithPosition):
+    """CropImageWithPosition 的 V2 版本，新增 original_mask 输出：与原图同尺寸的原始输入遮罩副本。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "mask": ("MASK",),
+                "expand_up": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999,
+                    "tooltip": "向上扩展裁剪区域（像素）"
+                }),
+                "expand_down": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999,
+                    "tooltip": "向下扩展裁剪区域（像素）"
+                }),
+                "expand_left": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999,
+                    "tooltip": "向左扩展裁剪区域（像素）"
+                }),
+                "expand_right": ("INT", {
+                    "default": 0,
+                    "min": -99999,
+                    "max": 99999,
+                    "tooltip": "向右扩展裁剪区域（像素）"
+                }),
+                "force_square": ("BOOLEAN", {
+                    "default": False,
+                    "label_on": "强制1:1比例",
+                    "label_off": "保持原比例",
+                    "tooltip": "开启后会根据expand参数自动调整为正方形裁剪区域"
+                }),
+            }
+        }
+
+    CATEGORY = "image"
+    FUNCTION = "main"
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "STRING", "MASK")
+    RETURN_NAMES = ("cropped_image", "cropped_mask", "original_image", "crop_position", "original_mask")
+
+    def main(self, image, mask, expand_up, expand_down, expand_left, expand_right, force_square):
+        # 复用 V1 全部逻辑
+        cropped, cropped_mask, original_image, crop_position = super().main(
+            image, mask, expand_up, expand_down, expand_left, expand_right, force_square
+        )
+
+        import json as _json
+        import torch.nn.functional as F
+        from PIL import Image
+        pos = _json.loads(crop_position)
+
+        # 统一遮罩为 (1, H, W) float32
+        if mask.dim() == 2:
+            mask_3d = mask.unsqueeze(0)
+        else:
+            mask_3d = mask
+        mask_3d = mask_3d.to(device=image.device, dtype=torch.float32)
+
+        img_h, img_w = int(image.shape[1]), int(image.shape[2])
+        crop_h, crop_w = int(cropped.shape[1]), int(cropped.shape[2])
+
+        # 空遮罩：按 crop_position 中的裁剪框算尺寸（V1 在 is_empty 时直接返回原图，所以 cropped 仍是原图大小）
+        if pos.get("is_empty", False):
+            empty_h = int(pos.get("bottom", 0)) - int(pos.get("top", 0)) + 1
+            empty_w = int(pos.get("right", 0)) - int(pos.get("left", 0)) + 1
+            empty_h = max(0, min(empty_h, img_h))
+            empty_w = max(0, min(empty_w, img_w))
+            return (cropped, cropped_mask, original_image, crop_position,
+                    torch.zeros(1, empty_h, empty_w, device=image.device, dtype=torch.float32))
+
+        # 1) 若遮罩与原图尺寸不一致，先 resize 到原图大小（与 V1 内部的 get_mask_bounding_box 行为对齐）
+        if mask_3d.shape[1] != img_h or mask_3d.shape[2] != img_w:
+            mask_aligned = F.interpolate(
+                mask_3d.unsqueeze(0), size=(img_h, img_w),
+                mode="bilinear", align_corners=False,
+            ).squeeze(0)
+        else:
+            mask_aligned = mask_3d
+
+        # 2) 在原图坐标下取出裁剪区域的遮罩子图（注意 expand 之后裁剪框可能超出原图范围）
+        left = int(pos["left"])
+        top = int(pos["top"])
+        right = int(pos["right"])
+        bottom = int(pos["bottom"])
+
+        # 实际从原图能取到的子区域（可能比裁剪框小）
+        src_top = max(0, top)
+        src_left = max(0, left)
+        src_bottom = min(img_h, bottom + 1)
+        src_right = min(img_w, right + 1)
+
+        if src_top >= src_bottom or src_left >= src_right:
+            # 裁剪框完全在原图外
+            region = torch.zeros(crop_h, crop_w, device=image.device, dtype=torch.float32)
+        else:
+            region = mask_aligned[0, src_top:src_bottom, src_left:src_right]
+
+        # 3) 把"原图坐标下的裁剪子区域"按 (crop_h, crop_w) 重采样到裁剪后尺寸
+        if region.shape[0] == crop_h and region.shape[1] == crop_w:
+            original_mask = region.unsqueeze(0).clone()
+        else:
+            # 用 PIL resize（最近邻保持 0/1 锐利边界；如需平滑可改 bilinear）
+            region_np = region.cpu().numpy()
+            region_uint8 = (np.clip(region_np, 0.0, 1.0) * 255).astype(np.uint8)
+            region_pil = Image.fromarray(region_uint8, mode="L").resize(
+                (crop_w, crop_h), Image.BILINEAR
+            )
+            resized_np = np.array(region_pil).astype(np.float32) / 255.0
+            original_mask = torch.from_numpy(resized_np)[None,].to(
+                device=image.device, dtype=torch.float32
+            )
+
+        return (cropped, cropped_mask, original_image, crop_position, original_mask)
+
+
 class PasteCroppedImage:
     """将处理后的裁剪图像贴回原图"""
 
@@ -1024,6 +1146,75 @@ class MaskToCropPosition:
         }
 
         return (json.dumps(pos),)
+
+
+class CropPositionToMask:
+    """将裁剪位置信息（crop_position JSON）转换为与原图同尺寸的矩形遮罩"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "original_image": ("IMAGE", {
+                    "tooltip": "原图（用于确定遮罩的宽高，尺寸可与 crop_position 中的 original_width/height 不一致）"
+                }),
+                "crop_position": ("STRING", {
+                    "multiline": True,
+                    "tooltip": "裁剪位置信息（JSON 格式）"
+                }),
+            }
+        }
+
+    CATEGORY = "image"
+    FUNCTION = "main"
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("mask",)
+
+    def main(self, original_image, crop_position):
+        """
+        将 crop_position 转换为与原图同尺寸的矩形全填充遮罩
+
+        Args:
+            original_image: 原图，用于决定输出遮罩的 H/W
+            crop_position: 裁剪位置信息（JSON 格式）
+
+        Returns:
+            mask: 与原图同尺寸的遮罩，矩形区域内为 1，其余为 0，shape (1, H, W)
+        """
+        import json
+
+        # 解析 JSON
+        try:
+            pos = json.loads(crop_position)
+        except Exception:
+            raise ValueError("crop_position 必须是有效的 JSON 字符串")
+
+        img_h = int(original_image.shape[1])
+        img_w = int(original_image.shape[2])
+        device = original_image.device
+        dtype = torch.float32
+
+        # 空裁剪区域：返回全 0 遮罩
+        if pos.get("is_empty", False):
+            return (torch.zeros(1, img_h, img_w, device=device, dtype=dtype),)
+
+        left = int(pos["left"])
+        top = int(pos["top"])
+        right = int(pos["right"])
+        bottom = int(pos["bottom"])
+
+        # 坐标裁剪到图像范围内
+        left = max(0, min(left, img_w - 1))
+        top = max(0, min(top, img_h - 1))
+        right = max(0, min(right, img_w - 1))
+        bottom = max(0, min(bottom, img_h - 1))
+
+        # 构造矩形遮罩
+        mask = torch.zeros(1, img_h, img_w, device=device, dtype=dtype)
+        if right >= left and bottom >= top:
+            mask[:, top:bottom + 1, left:right + 1] = 1.0
+
+        return (mask,)
 
 
 class MaskEdgeMarker:

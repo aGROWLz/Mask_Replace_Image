@@ -7,9 +7,11 @@ from .image_ops import (
     VisualizeDetectionBox,
     FillMaskWithColor,
     CropImageWithPosition,
+    CropImageWithPositionV2,
     PasteCroppedImage,
     PasteCroppedImageWithEdgeMarker,
     MaskToCropPosition,
+    CropPositionToMask,
     MaskEdgeMarker,
 )
 from .color_match import ImageColorMatch
@@ -24,9 +26,11 @@ NODE_CLASS_MAPPINGS = {
     "VisualizeDetectionBox": VisualizeDetectionBox,
     "FillMaskWithColor": FillMaskWithColor,
     "CropImageWithPosition": CropImageWithPosition,
+    "CropImageWithPositionV2": CropImageWithPositionV2,
     "PasteCroppedImage": PasteCroppedImage,
     "PasteCroppedImageWithEdgeMarker": PasteCroppedImageWithEdgeMarker,
     "MaskToCropPosition": MaskToCropPosition,
+    "CropPositionToMask": CropPositionToMask,
     "MaskEdgeMarker": MaskEdgeMarker,
     "ImageColorMatch-mask": ImageColorMatch,
 }
@@ -41,9 +45,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VisualizeDetectionBox": "可视化检测框",
     "FillMaskWithColor": "遮罩区域填充颜色",
     "CropImageWithPosition": "裁剪图像（带位置信息）",
+    "CropImageWithPositionV2": "裁剪图像（带位置信息）V2",
     "PasteCroppedImage": "贴回裁剪图像",
     "PasteCroppedImageWithEdgeMarker": "贴回裁剪图像（边缘标记）",
     "MaskToCropPosition": "遮罩转裁剪位置",
+    "CropPositionToMask": "裁剪位置转遮罩",
     "MaskEdgeMarker": "遮罩边缘标记",
     "ImageColorMatch-mask": "图像颜色匹配（遮罩）",
 }
