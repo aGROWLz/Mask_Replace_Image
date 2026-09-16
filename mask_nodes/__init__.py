@@ -13,6 +13,7 @@ from .mask_ops import (
     MergeMasksDelete,
     SelectLargestMask,
     SelectLargestMaskByArea,
+    ExtractWhitePixelMask,
 )
 
 from .replace_ops import (
@@ -29,6 +30,7 @@ NODE_CLASS_MAPPINGS = {
     "MergeMasksDelete": MergeMasksDelete,
     "SelectLargestMask": SelectLargestMask,
     "SelectLargestMaskByArea": SelectLargestMaskByArea,
+    "ExtractWhitePixelMask": ExtractWhitePixelMask,
     "ImageReplaceWithMask": ImageReplaceWithMask,
     "ImageReplaceWithMaskV2": ImageReplaceWithMaskV2,
     "ImageReplaceWithMaskV3": ImageReplaceWithMaskV3,
@@ -42,6 +44,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MergeMasksDelete": "合并遮罩（删除）",
     "SelectLargestMask": "筛选最大遮罩",
     "SelectLargestMaskByArea": "筛选最大遮罩（按面积）",
+    "ExtractWhitePixelMask": "提取纯白像素遮罩",
     "ImageReplaceWithMask": "智能物体替换",
     "ImageReplaceWithMaskV2": "智能物体替换 V2",
     "ImageReplaceWithMaskV3": "智能物体替换 V3",

@@ -2,3 +2,7 @@ __pycache__/
 face_nodes/models/
 .reference/
 .trae/
+docs/
+.worktrees/
+tests/
+.pytest_cache/

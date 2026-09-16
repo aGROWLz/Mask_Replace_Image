@@ -957,6 +957,69 @@ class CropImageWithPositionV2(CropImageWithPosition):
         return (cropped, cropped_mask, original_image, crop_position, original_mask)
 
 
+class MaskMosaic:
+    """在遮罩区域应用马赛克效果"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "mask": ("MASK",),
+                "block_size": ("INT", {
+                    "default": 16,
+                    "min": 2,
+                    "max": 128,
+                    "step": 1,
+                    "display": "slider",
+                    "tooltip": "马赛克块大小，数值越大越粗糙",
+                }),
+            }
+        }
+
+    CATEGORY = "image"
+    FUNCTION = "main"
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+
+    def main(self, image, mask, block_size):
+        import torch.nn.functional as F
+
+        _, image_height, image_width, channels = image.shape
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+        mask = mask.to(device=image.device, dtype=image.dtype)
+
+        if mask.shape[0] == 1 and image.shape[0] > 1:
+            mask = mask.expand(image.shape[0], -1, -1)
+        if mask.shape[1] != image_height or mask.shape[2] != image_width:
+            mask = F.interpolate(
+                mask.unsqueeze(1), size=(image_height, image_width),
+                mode="bilinear", align_corners=False,
+            ).squeeze(1)
+
+        rgb = image[..., :3]
+        rgb_nchw = rgb.permute(0, 3, 1, 2)
+        block_colors = F.avg_pool2d(
+            rgb_nchw,
+            kernel_size=block_size,
+            stride=block_size,
+            ceil_mode=True,
+            count_include_pad=False,
+        )
+        mosaic = F.interpolate(
+            block_colors, size=(image_height, image_width), mode="nearest"
+        ).permute(0, 2, 3, 1)
+        mask_rgb = mask.unsqueeze(-1).clamp(0.0, 1.0)
+        result_rgb = rgb * (1.0 - mask_rgb) + mosaic * mask_rgb
+
+        if channels > 3:
+            result = torch.cat([result_rgb, image[..., 3:]], dim=-1)
+        else:
+            result = result_rgb
+        return (result,)
+
+
 class PasteCroppedImage:
     """将处理后的裁剪图像贴回原图"""
 

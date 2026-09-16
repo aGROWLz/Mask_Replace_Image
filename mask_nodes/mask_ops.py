@@ -186,6 +186,27 @@ class MergeMasksV2:
         return mask.to(dtype=torch.float32)
 
 
+class ExtractWhitePixelMask:
+    """从图片中提取纯白（#FFFFFF）像素区域作为遮罩"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+            }
+        }
+
+    CATEGORY = "mask"
+    FUNCTION = "main"
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("mask",)
+
+    def main(self, image):
+        """仅将 RGB 三个通道都为 1.0 的像素标记为遮罩区域。"""
+        return (torch.all(image[..., :3] == 1.0, dim=-1).to(dtype=torch.float32),)
+
+
 class SelectLargestMask:
     """根据boxes面积筛选出最大的遮罩"""
     

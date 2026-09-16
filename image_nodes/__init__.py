@@ -13,6 +13,7 @@ from .image_ops import (
     MaskToCropPosition,
     CropPositionToMask,
     MaskEdgeMarker,
+    MaskMosaic,
 )
 from .color_match import ImageColorMatch
 
@@ -32,6 +33,7 @@ NODE_CLASS_MAPPINGS = {
     "MaskToCropPosition": MaskToCropPosition,
     "CropPositionToMask": CropPositionToMask,
     "MaskEdgeMarker": MaskEdgeMarker,
+    "MaskMosaic": MaskMosaic,
     "ImageColorMatch-mask": ImageColorMatch,
 }
 
@@ -51,6 +53,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MaskToCropPosition": "遮罩转裁剪位置",
     "CropPositionToMask": "裁剪位置转遮罩",
     "MaskEdgeMarker": "遮罩边缘标记",
+    "MaskMosaic": "遮罩区域马赛克",
     "ImageColorMatch-mask": "图像颜色匹配（遮罩）",
 }
 
