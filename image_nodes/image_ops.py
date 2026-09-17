@@ -1558,6 +1558,118 @@ class PasteCroppedImageWithEdgeMarkerV2:
         return result, edge_mask, marked_image
 
 
+class PasteCroppedImageWithEdgeMarkerV3(PasteCroppedImageWithEdgeMarkerV2):
+    """V2 的四方向移动版，支持四方向独立内扩与外扩。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        inputs = PasteCroppedImageWithEdgeMarkerV2.INPUT_TYPES()
+        required = inputs["required"]
+        required.pop("expand_outward")
+        required.pop("expand_inward")
+        for name, tooltip in (
+            ("expand_outward_up", "标记区域向上外扩的像素数"),
+            ("expand_outward_down", "标记区域向下外扩的像素数"),
+            ("expand_outward_left", "标记区域向左外扩的像素数"),
+            ("expand_outward_right", "标记区域向右外扩的像素数"),
+            ("expand_inward_up", "标记区域向图片内侧上扩的像素数"),
+            ("expand_inward_down", "标记区域向图片内侧下扩的像素数"),
+            ("expand_inward_left", "标记区域向图片内侧左扩的像素数"),
+            ("expand_inward_right", "标记区域向图片内侧右扩的像素数"),
+        ):
+            required[name] = ("INT", {
+                "default": 10,
+                "min": 0,
+                "max": 500,
+                "step": 1,
+                "tooltip": tooltip,
+            })
+        return inputs
+
+    def main(self, processed_image, original_image, feather, marker_alpha, edge_mode, mask_alpha,
+             marker_color, move_up=0, move_down=0, move_left=0, move_right=0,
+             expand_outward_up=10, expand_outward_down=10,
+             expand_outward_left=10, expand_outward_right=10,
+             expand_inward_up=10, expand_inward_down=10,
+             expand_inward_left=10, expand_inward_right=10,
+             crop_position=None, mask=None, processed_mask=None):
+        import json
+        from PIL import Image
+
+        if crop_position is not None and crop_position.strip():
+            pos = json.loads(crop_position)
+            if pos.get("is_empty", False):
+                return original_image, torch.zeros_like(original_image[:, :, :, 0]), original_image
+            left, top = pos["left"], pos["top"]
+            right, bottom = pos["right"], pos["bottom"]
+        elif mask is not None:
+            rows = torch.any(mask.squeeze(0) > 0, dim=1)
+            cols = torch.any(mask.squeeze(0) > 0, dim=0)
+            if not torch.any(rows) or not torch.any(cols):
+                return original_image, torch.zeros_like(original_image[:, :, :, 0]), original_image
+            top = int(torch.argmax(rows))
+            bottom = int(len(rows) - torch.argmax(torch.flip(rows, dims=[0])) - 1)
+            left = int(torch.argmax(cols))
+            right = int(len(cols) - torch.argmax(torch.flip(cols, dims=[0])) - 1)
+        else:
+            raise ValueError("必须提供 crop_position 或 mask 其中之一")
+
+        target_width, target_height = right - left + 1, bottom - top + 1
+        proc = processed_image
+        if proc.shape[1] != target_height or proc.shape[2] != target_width:
+            proc_np = (proc[0].cpu().numpy() * 255).astype(np.uint8)
+            proc_np = np.array(Image.fromarray(proc_np).resize(
+                (target_width, target_height), Image.LANCZOS)).astype(np.float32) / 255.0
+            proc = torch.from_numpy(proc_np)[None].to(original_image.device, original_image.dtype)
+
+        img_h, img_w = original_image.shape[1], original_image.shape[2]
+        outer_left = max(0, left - expand_outward_left)
+        outer_top = max(0, top - expand_outward_up)
+        outer_right = min(img_w - 1, right + expand_outward_right)
+        outer_bottom = min(img_h - 1, bottom + expand_outward_down)
+        canvas_h, canvas_w = outer_bottom - outer_top + 1, outer_right - outer_left + 1
+
+        source_top = min(expand_inward_up, target_height)
+        source_left = min(expand_inward_left, target_width)
+        source_bottom = max(source_top, target_height - expand_inward_down)
+        source_right = max(source_left, target_width - expand_inward_right)
+        image_top = top + source_top - outer_top + move_down - move_up
+        image_left = left + source_left - outer_left + move_right - move_left
+        src_top = max(source_top, source_top - image_top)
+        src_left = max(source_left, source_left - image_left)
+        src_bottom = min(source_bottom, source_top + canvas_h - image_top)
+        src_right = min(source_right, source_left + canvas_w - image_left)
+
+        canvas = torch.ones(1, canvas_h, canvas_w, proc.shape[3], device=original_image.device, dtype=original_image.dtype)
+        if src_bottom > src_top and src_right > src_left:
+            canvas[:, image_top + src_top - source_top:image_top + src_bottom - source_top,
+                   image_left + src_left - source_left:image_left + src_right - source_left, :] = proc[:, src_top:src_bottom, src_left:src_right, :]
+        result = original_image.clone()
+        result[:, outer_top:outer_bottom + 1, outer_left:outer_right + 1, :] = canvas
+
+        edge_mask = torch.zeros(1, img_h, img_w, device=original_image.device, dtype=torch.float32)
+        edge_mask[:, outer_top:outer_bottom + 1, outer_left:outer_right + 1] = 1.0
+        if src_bottom > src_top and src_right > src_left:
+            visible_top = outer_top + image_top + src_top - source_top
+            visible_left = outer_left + image_left + src_left - source_left
+            visible_bottom = outer_top + image_top + src_bottom - source_top
+            visible_right = outer_left + image_left + src_right - source_left
+            edge_mask[:, visible_top:visible_bottom, visible_left:visible_right] = 0.0
+        edge_mask = edge_mask * mask_alpha
+
+        marker_rgb = torch.zeros_like(result[:, :, :, :3])
+        color_hex = marker_color.strip().lstrip('#')
+        if len(color_hex) != 6:
+            raise ValueError(f"marker_color 必须是 6 位十六进制颜色码，如 #ff0000，当前为: {marker_color}")
+        marker_rgb[:, :, :, 0] = int(color_hex[0:2], 16) / 255.0
+        marker_rgb[:, :, :, 1] = int(color_hex[2:4], 16) / 255.0
+        marker_rgb[:, :, :, 2] = int(color_hex[4:6], 16) / 255.0
+        edge = edge_mask.unsqueeze(-1)
+        marked_rgb = result[:, :, :, :3] * (1 - edge * marker_alpha) + marker_rgb * edge * marker_alpha
+        marked_image = torch.cat([marked_rgb, torch.ones_like(edge)], dim=-1)
+        return result, edge_mask, marked_image
+
+
 class PasteCroppedImageWithEdgeMarker:
     """将处理后的裁剪图像贴回原图，并在裁剪边缘生成标记遮罩和红色透明图层"""
 
