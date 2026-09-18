@@ -18,6 +18,7 @@ from .image_ops import (
     MaskMosaic,
 )
 from .color_match import ImageColorMatch
+from .image_overlay import AlphaOverlayImage
 
 # 节点类映射
 NODE_CLASS_MAPPINGS = {
@@ -39,6 +40,7 @@ NODE_CLASS_MAPPINGS = {
     "MaskEdgeMarker": MaskEdgeMarker,
     "MaskMosaic": MaskMosaic,
     "ImageColorMatch-mask": ImageColorMatch,
+    "AlphaOverlayImage": AlphaOverlayImage,
 }
 
 # 节点显示名称映射
@@ -61,6 +63,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MaskEdgeMarker": "遮罩边缘标记",
     "MaskMosaic": "遮罩区域马赛克",
     "ImageColorMatch-mask": "图像颜色匹配（遮罩）",
+    "AlphaOverlayImage": "透明图叠加到主图像",
 }
 
 __all__ = [
